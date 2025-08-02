@@ -13,7 +13,7 @@
 %%% PAGE DIMENSIONS
 \usepackage{geometry} % to change the page dimensions
 \geometry{a4paper} % or letterpaper (US) or a5paper or....
-\usepackage[italian]{babel}
+\usepackage[english]{babel}  % CHANGED: italian -> english
 
 %%% BIBLIOGRAPHY
 \usepackage{natbib}
@@ -91,8 +91,8 @@
 \raggedbottom % no force to cover the whole page
 \usepackage{todonotes}
 %%% 
-\usepackage{tikz,pgf} %per l'immagine di sfondo in copertina
-\usetikzlibrary{matrix,positioning,decorations.pathreplacing}  % per la matrice a blocchi
+\usepackage{tikz,pgf} % for background image on cover page
+\usetikzlibrary{matrix,positioning,decorations.pathreplacing}  % for block matrix
 
 %%% SECTION TITLE APPEARANCE
 %\usepackage{sectsty}
@@ -106,7 +106,7 @@
 \renewcommand{\cftsecpagefont}{\rmfamily\mdseries\upshape} % No bold!
 
 %%%	PATH for images
-\graphicspath{{./immagini/}}
+\graphicspath{{./images/}}  % CHANGED: ./immagini/ -> ./images/
 
 %format title of section
 %\usepackage{titlesec} % Used to customize the \section command
@@ -119,27 +119,26 @@
 \numberwithin{equation}{chapter}
 
 \theoremstyle{plain}
-\newtheorem{Teorema}{Teorema}[chapter]
-\newtheorem{Lemma}[Teorema]{Lemma}
-\newtheorem{Proposizione}[Teorema]{Proposizione}
-\newtheorem{Corollario}[Teorema]{Corollario}
-%\newtheorem*{defn}{Definizione} 
+% CHANGED: All theorem environments translated to English
+\newtheorem{Theorem}{Theorem}[chapter]
+\newtheorem{Lemma}[Theorem]{Lemma}
+\newtheorem{Proposition}[Theorem]{Proposition}
+\newtheorem{Corollary}[Theorem]{Corollary}
+%\newtheorem*{defn}{Definition} 
 \theoremstyle{definition}
-\newtheorem{Osservazione}[Teorema]{Osservazione}
-\newtheorem{Esempio}[Teorema]{Esempio}
-\newtheorem{Esercizio}[Teorema]{Es.}
-\newtheorem{Definizione}[Teorema]{Definizione}
-\newtheorem{Notazione}[Teorema]{Notazione}
-
-
+\newtheorem{Observation}[Theorem]{Observation}
+\newtheorem{Example}[Theorem]{Example}
+\newtheorem{Exercise}[Theorem]{Exercise}
+\newtheorem{Definition}[Theorem]{Definition}
+\newtheorem{Notation}[Theorem]{Notation}
 
 \setcounter{tocdepth}{1} 
 %-------------------------------------------------------------------
-%   PACKAGE PER IL CODICE MATLAB
+%   PACKAGE FOR MATLAB CODE
 %-------------------------------------------------------------------
 \usepackage[framed,numbered,autolinebreaks,useliterate]{mcode}
 %-------------------------------------------------------------------
-%	INIZIO DEL DOCUMENTO
+%	DOCUMENT START
 %-------------------------------------------------------------------
 %
 
@@ -171,5 +170,5 @@
 \bibliography{./src/bibliography}
 
 
-% Ringraziamenti
+% Acknowledgements  % CHANGED: Ringraziamenti -> Acknowledgements
 \end{document}
