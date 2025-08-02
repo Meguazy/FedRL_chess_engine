@@ -1,0 +1,175 @@
+\documentclass[12 pt ,a4 paper , twoside, openright]{book}
+ % use larger type; default would be 10pt
+\usepackage{setspace}
+\onehalfspacing
+\usepackage[utf8]{inputenc} % set input encoding (not needed with XeLaTeX)
+\newcommand\floor[1]{\lfloor#1\rceil}
+\renewcommand\labelenumi{(\theenumi)}
+
+%%% Examples of Article customizations
+% These packages are optional, depending whether you want the features they provide.
+% See the LaTeX Companion or other references for full information.
+
+%%% PAGE DIMENSIONS
+\usepackage{geometry} % to change the page dimensions
+\geometry{a4paper} % or letterpaper (US) or a5paper or....
+\usepackage[italian]{babel}
+
+%%% BIBLIOGRAPHY
+\usepackage{natbib}
+%\usepackage[babel]{csquotes}
+%\usepackage[]{biblatex} % for the bibliography
+%%\nocite{*}
+%\usepackage[style=alphabetic]{biblatex}
+
+% ABSTRACT ENVIRONMENT FOR BOOK CLASS
+\usepackage{fancyhdr}
+\newcommand{\fncyblank}{\fancyhf{}}
+\newenvironment {abstract}%
+{\cleardoublepage \fncyblank \null \begin{center}%
+	\bfseries \abstractname \end{center}}%
+{ \null }
+
+% Page Layout
+
+% \geometry{margin=1.5 in} % for example, change the margins to 2 inches all round
+% \geometry{landscape} % set up the page for landscape
+%   read geometry.pdf for detailed page layout information
+\usepackage{graphicx} % support the \includegraphics command and options
+%----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+%\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{amssymb}
+\usepackage[parfill]{parskip} % Activate to begin paragraphs with an empty line rather than an indent
+
+\usepackage[bookmarks]{hyperref}
+
+\usepackage{bold-extra}
+
+%----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+%%% PACKAGES
+\usepackage{booktabs} % for much better looking tables
+\usepackage{array} % for better arrays (eg matrices) in maths
+\usepackage{paralist} % very flexible & customisable lists (eg. enumerate/itemize, etc.)
+\usepackage{verbatim} % adds environment for commenting out blocks of text & for better verbatim
+\usepackage{subfigure} % make it possible to include more than one captioned figure/table in a single float
+%\usepackage{wrapfig} % make it possible to insert figure in with text around
+\usepackage{caption} 
+\captionsetup{tableposition=bottom,figureposition=bottom,font=small}
+
+\usepackage{fancyref}
+
+%%% LAYOUT
+%%% HEADERS & FOOTERS
+%\usepackage{fancyhdr} % This should be set AFTER setting up the page geometry
+\pagestyle{fancy} % options: empty , plain , fancy
+\fancyhf{}
+\newcommand{\fncyfront}{% FRONT STYLE
+%	\fancyhead[RO]{{\footnotesize\rightmark}}
+	\fancyfoot[RO]{}
+%	\fancyhead[LE]{\footnotesize{\leftmark}}
+	\fancyfoot[LE]{}
+	\fancyhead[RE,LO]{}
+	\fancyfoot[C]{}
+	\renewcommand{\footrulewidth}{0.3pt}
+}
+
+\newcommand{\fncymain}{% MAIN STYLE
+	\fancyhead[RO]{{\footnotesize\MakeUppercase
+			\rightmark}}
+	\fancyfoot[RO]{\thepage}
+	\fancyhead[LE]{{\footnotesize\MakeUppercase
+			\leftmark}}
+	\fancyfoot[LE]{\thepage}
+	\fancyfoot[C]{}
+	\renewcommand{\headrulewidth}{0.1pt}
+	\renewcommand{\footrulewidth}{0.1pt}
+}
+
+\raggedbottom % no force to cover the whole page
+\usepackage{todonotes}
+%%% 
+\usepackage{tikz,pgf} %per l'immagine di sfondo in copertina
+\usetikzlibrary{matrix,positioning,decorations.pathreplacing}  % per la matrice a blocchi
+
+%%% SECTION TITLE APPEARANCE
+%\usepackage{sectsty}
+%\allsectionsfont{\sffamily\mdseries\upshape} % (See the fntguide.pdf for font help)
+% (This matches ConTeXt defaults)
+
+%%% ToC (table of contents) APPEARANCE
+\usepackage[nottoc,notlof,notlot]{tocbibind} % Put the bibliography in the ToC
+\usepackage[titles,subfigure]{tocloft} % Alter the style of the Table of Contents
+\renewcommand{\cftsecfont}{\rmfamily\mdseries\upshape}
+\renewcommand{\cftsecpagefont}{\rmfamily\mdseries\upshape} % No bold!
+
+%%%	PATH for images
+\graphicspath{{./immagini/}}
+
+%format title of section
+%\usepackage{titlesec} % Used to customize the \section command
+%\titleformat{\section}{\large\scshape\raggedright}{}{0em}{}[\titlerule] % Text formatting of sections
+%\titlespacing{\section}{3pt}{3pt}{0.5 cm} % Spacing around sections
+
+%-------------------------------------------------------------------
+%	New Command Section
+%-------------------------------------------------------------------
+\numberwithin{equation}{chapter}
+
+\theoremstyle{plain}
+\newtheorem{Teorema}{Teorema}[chapter]
+\newtheorem{Lemma}[Teorema]{Lemma}
+\newtheorem{Proposizione}[Teorema]{Proposizione}
+\newtheorem{Corollario}[Teorema]{Corollario}
+%\newtheorem*{defn}{Definizione} 
+\theoremstyle{definition}
+\newtheorem{Osservazione}[Teorema]{Osservazione}
+\newtheorem{Esempio}[Teorema]{Esempio}
+\newtheorem{Esercizio}[Teorema]{Es.}
+\newtheorem{Definizione}[Teorema]{Definizione}
+\newtheorem{Notazione}[Teorema]{Notazione}
+
+
+
+\setcounter{tocdepth}{1} 
+%-------------------------------------------------------------------
+%   PACKAGE PER IL CODICE MATLAB
+%-------------------------------------------------------------------
+\usepackage[framed,numbered,autolinebreaks,useliterate]{mcode}
+%-------------------------------------------------------------------
+%	INIZIO DEL DOCUMENTO
+%-------------------------------------------------------------------
+%
+
+\begin{document}
+\fncyfront
+\frontmatter % SET FRONT LAYOUT STYLE
+
+\input{./src/titlepage.tex}
+
+%	\input{./src/abstract.tex}
+%	\input{./src/acknowledgements.tex}
+	
+\tableofcontents
+%\listoffigures
+%\listoftables
+
+\fncymain
+\mainmatter % SET MAIN LAYOUT STYLE
+
+% CHAPTERS
+
+
+% APPENDIXES
+
+
+% BIBLIOGRAPHY
+
+\bibliographystyle{abbrv}
+\bibliography{./src/bibliography}
+
+
+% Ringraziamenti
+\end{document}
