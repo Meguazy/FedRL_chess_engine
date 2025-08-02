@@ -13,18 +13,21 @@
 %%% PAGE DIMENSIONS
 \usepackage{geometry} % to change the page dimensions
 \geometry{a4paper} % or letterpaper (US) or a5paper or....
-\usepackage[english]{babel}  % CHANGED: italian -> english
-
+\setlength{\headheight}{14.49998pt}
+\addtolength{\topmargin}{-2.49998pt}
 %%% BIBLIOGRAPHY
-\usepackage{natbib}
+%\usepackage{natbib}
 %\usepackage[babel]{csquotes}
 %\usepackage[]{biblatex} % for the bibliography
+%%\nocite{*}
+%\usepackage[style=alphabetic]{biblatex}
 %%\nocite{*}
 %\usepackage[style=alphabetic]{biblatex}
 
 % ABSTRACT ENVIRONMENT FOR BOOK CLASS
 \usepackage{fancyhdr}
 \newcommand{\fncyblank}{\fancyhf{}}
+\providecommand{\abstractname}{Abstract}
 \newenvironment {abstract}%
 {\cleardoublepage \fncyblank \null \begin{center}%
 	\bfseries \abstractname \end{center}}%
@@ -148,7 +151,7 @@
 
 \input{./src/titlepage.tex}
 
-%	\input{./src/abstract.tex}
+\input{./src/abstract.tex}
 %	\input{./src/acknowledgements.tex}
 	
 \tableofcontents
@@ -158,12 +161,12 @@
 \fncymain
 \mainmatter % SET MAIN LAYOUT STYLE
 
-% CHAPTERS
 
+
+% CHAPTERS
+\input{./src/chapters/Chapter_1/chapter1.tex}
 
 % APPENDIXES
-
-
 % BIBLIOGRAPHY
 
 \bibliographystyle{abbrv}

@@ -1,0 +1,32 @@
+\begin{thebibliography}{1}
+
+\bibitem{demarzo2022quantifying}
+G.~De~Marzo and V.~D.~P. Servedio.
+\newblock Quantifying the complexity and similarity of chess openings using online chess community data, 2022.
+\newblock Version 2, submitted July 23, 2022.
+
+\bibitem{li2020federated}
+T.~Li, A.~K. Sahu, M.~Zaheer, M.~Sanjabi, A.~Talwalkar, and V.~Smith.
+\newblock Federated optimization in heterogeneous networks, 2019.
+
+\bibitem{matanovic1974encyclopedia}
+A.~Matanović, M.~Molerović, A.~Božić, et~al.
+\newblock {\em Encyclopaedia of Chess Openings}.
+\newblock Chess Informant, Belgrade, 1974--1979.
+\newblock Compiled by grandmaster editorial board including Botvinnik, M., Kasparov, G., Korchnoi, V., Larsen, B., Geller, E., and others.
+
+\bibitem{mcmahan2017fedavg}
+H.~B. McMahan, E.~Moore, D.~Ramage, S.~Hampson, and B.~A. y~Arcas.
+\newblock Communication-efficient learning of deep networks from decentralized data, 2023.
+
+\bibitem{silver2017mastering}
+D.~Silver, T.~Hubert, J.~Schrittwieser, I.~Antonoglou, M.~Lai, A.~Guez, M.~Lanctot, L.~Sifre, D.~Kumaran, T.~Graepel, T.~Lillicrap, K.~Simonyan, and D.~Hassabis.
+\newblock Mastering chess and shogi by self-play with a general reinforcement learning algorithm, 2017.
+
+\bibitem{chess_opening_styles}
+B.~Wall.
+\newblock Classification of chess openings by style.
+\newblock \url{https://billwallchess.blogspot.com/2020/12/classification-of-chess-openings.html}, 2020.
+\newblock Chess Informant-based classification: "Tactical openings are usually gambits or sharp openings. Positional openings are usually closed openings".
+
+\end{thebibliography}
