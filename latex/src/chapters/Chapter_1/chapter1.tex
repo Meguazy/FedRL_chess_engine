@@ -4,32 +4,44 @@
 \section{Research Background and Motivation}
 \label{sec:background}
 
-The advent of federated learning has revolutionized distributed machine learning by enabling collaborative model training without centralized data sharing \cite{mcmahan2017fedavg}. Simultaneously, reinforcement learning has achieved remarkable success in complex strategic domains, most notably demonstrated by AlphaZero's mastery of chess, shogi, and Go through self-play \cite{silver2017mastering}. The intersection of these paradigms, federated reinforcement learning, presents unprecedented opportunities for developing distributed intelligent systems that can leverage collective experience while maintaining privacy and computational efficiency.
+The convergence of federated learning, reinforcement learning, and educational robotics presents unprecedented opportunities for developing intelligent systems that preserve beneficial diversity while enabling tangible human interaction. The advent of federated learning has revolutionized distributed machine learning by enabling collaborative model training without centralized data sharing \cite{mcmahan2017fedavg}, while reinforcement learning has achieved remarkable success in complex strategic domains, most notably demonstrated by AlphaZero's mastery of chess, shogi, and Go through self-play \cite{silver2017mastering}. Simultaneously, advances in educational robotics have created new possibilities for human-AI interaction that transform abstract computational concepts into concrete, experiential learning opportunities.
 
-In the domain of chess artificial intelligence, the homogenization of playing styles represents a fundamental challenge that has received limited attention in current research. Traditional federated learning approaches, particularly Federated Averaging (FedAvg) \cite{mcmahan2017fedavg}, inherently drive participating models toward convergence, effectively eliminating the beneficial diversity that characterizes human chess expertise. This convergence tendency directly contradicts centuries of chess theory, which recognizes the existence of diverse playing styles such as tactical, positional, aggressive and dynamic approaches, each offering unique strategic advantages in different game contexts \cite{matanovic1974encyclopedia}.
+In the domain of chess artificial intelligence, the homogenization of playing styles represents a fundamental challenge that extends beyond computational efficiency to impact human learning and engagement. Traditional federated learning approaches, particularly Federated Averaging (FedAvg) \cite{mcmahan2017fedavg}, inherently drive participating models toward convergence, effectively eliminating the beneficial diversity that characterizes human chess expertise. This convergence tendency directly contradicts centuries of chess theory, which recognizes the existence of diverse playing styles such as tactical, positional, aggressive, and dynamic approaches, each offering unique strategic advantages in different game contexts \cite{matanovic1974encyclopedia}.
 
-Recent empirical analysis has demonstrated that chess players naturally cluster by playing style preferences, with opening repertoire choices serving as reliable indicators of strategic inclinations \cite{demarzo2022quantifying}. This natural clustering suggests that beneficial heterogeneity exists in chess expertise and should be preserved rather than eliminated through homogenizing aggregation methods. The preservation of such diversity is not merely an academic curiosity but represents a fundamental requirement for developing chess AI systems that can adapt to varied opponents and game contexts.
+The motivation for this research stems from three critical observations that reveal significant gaps in current federated learning applications:
 
-The computational advantages of federated learning become particularly compelling when applied to chess engine development, where training state-of-the-art models requires substantial computational resources typically available only to major technology companies. By enabling distributed training across multiple nodes while preserving the strategic diversity that makes chess intellectually rich, federated chess learning could democratize access to advanced chess AI development while maintaining the game's inherent complexity and appeal.
+\textbf{Loss of Strategic Diversity in AI Systems:} Recent empirical analysis has demonstrated that chess players naturally cluster by playing style preferences, with opening repertoire choices serving as reliable indicators of strategic inclinations \cite{demarzo2022quantifying}. This natural clustering suggests that beneficial heterogeneity exists in chess expertise and should be preserved rather than eliminated through homogenizing aggregation methods. However, no existing federated learning framework specifically addresses the preservation of such strategic diversity while maintaining collaborative learning benefits.
+
+\textbf{Disconnect Between AI Capabilities and Human Learning:} While modern chess engines achieve superhuman performance, they often provide generic, homogenized playing experiences that fail to offer the varied learning opportunities that human players need for skill development. Human chess improvement relies on exposure to different playing styles and strategic approaches, yet current AI systems increasingly converge toward similar patterns that, while optimal, provide limited educational value for human learners seeking to understand chess diversity.
+
+\textbf{Lack of Physical Validation for Federated Learning Diversity:} Existing federated learning research predominantly focuses on computational metrics and algorithmic performance, with limited attention to whether preserved diversity translates into genuinely different and valuable user experiences. The field lacks comprehensive physical validation systems that can demonstrate whether theoretical diversity preservation creates meaningful real-world differences that humans can recognize, learn from, and benefit from in practical applications.
+
+These observations led to the realization that chess represents an ideal domain for developing diversity-preserving federated learning approaches, with the additional opportunity to validate these approaches through physical robotic systems that enable direct human interaction. The computational advantages of federated learning become particularly compelling when applied to chess engine development, where training state-of-the-art models requires substantial computational resources typically available only to major technology companies. By enabling distributed training across multiple nodes while preserving the strategic diversity that makes chess intellectually rich, and by validating this diversity through physical robotic demonstration, federated chess learning could democratize access to advanced chess AI development while providing tangible proof of the educational value of preserved diversity.
+
+Furthermore, the integration of physical chess-playing robotics addresses a critical gap in human-AI interaction research. While significant advances have been made in developing chess AI systems and in building robotic manipulation systems, few attempts have been made to create comprehensive systems that bridge high-level strategic AI decision-making with precise physical execution, particularly in educational contexts where style diversity is crucial for effective learning.
 
 \section{Problem Statement}
 \label{sec:problem}
 
-Standard federated learning protocols, exemplified by Federated Averaging (FedAvg), employ homogenizing aggregation strategies that systematically eliminate client heterogeneity in pursuit of global model convergence \cite{li2020federated}. When applied to chess reinforcement learning, this homogenization process destroys the beneficial diversity of playing styles that has been recognized as fundamental to chess mastery for centuries.
+Standard federated learning protocols, exemplified by Federated Averaging (FedAvg), employ homogenizing aggregation strategies that systematically eliminate client heterogeneity in pursuit of global model convergence \cite{li2020federated}. When applied to chess reinforcement learning and deployed in physical robotic systems designed for human interaction, this homogenization process creates multiple interconnected problems that span computational efficiency, educational effectiveness, and human-robot interaction quality.
 
-Specifically, the application of FedAvg to distributed chess engine training exhibits the following critical limitations:
+Specifically, the application of traditional federated learning to distributed chess engine training and physical robotic deployment exhibits the following critical limitations:
 
-\textbf{Strategic Homogenization:} Traditional federated aggregation forces diverse chess engines toward a uniform playing style that represents a statistical average of all participants, eliminating the tactical aggressiveness, positional depth, and dynamic flexibility that characterize distinct chess approaches.
+\textbf{Strategic Homogenization in Distributed Training:} Traditional federated aggregation forces diverse chess engines toward a uniform playing style that represents a statistical average of all participants, eliminating the tactical aggressiveness, positional depth, and dynamic flexibility that characterize distinct chess approaches. This homogenization not only reduces the computational diversity that could benefit distributed learning but also creates generic AI personalities that provide limited educational value when deployed in interactive systems.
 
-\textbf{Loss of Adaptive Capability:} Homogenized models lose the ability to adapt their playing style to different opponents or game situations, a capability that human chess masters employ to optimize their chances of success against varied competition.
+\textbf{Loss of Adaptive Capability in Physical Deployment:} Homogenized models lose the ability to adapt their playing style to different opponents or game situations, a capability that human chess masters employ to optimize their chances of success against varied competition. When deployed in physical robotic systems designed for human interaction, this limitation becomes particularly problematic as human learners benefit from exposure to varied strategic approaches rather than encountering the same generic playing pattern regardless of the selected opponent or learning context.
 
-\textbf{Reduced Learning Efficiency:} By forcing convergence toward a single strategic approach, traditional federated learning fails to leverage the complementary knowledge that different playing styles contribute to overall chess understanding.
+\textbf{Reduced Learning Efficiency in Collaborative Training:} By forcing convergence toward a single strategic approach, traditional federated learning fails to leverage the complementary knowledge that different playing styles contribute to overall chess understanding. This inefficiency is compounded when the trained models are deployed in educational robotic systems, as the lack of strategic diversity limits the range of learning experiences that can be provided to human users.
 
-\textbf{Theoretical Inconsistency:} The homogenization approach contradicts established chess theoretical frameworks maintained by grandmaster authorities, which recognize tactical, positional, and dynamic approaches as equally valid but strategically distinct paradigms \cite{matanovic1974encyclopedia,chess_opening_styles}.
+\textbf{Inadequate Physical Validation of Diversity Preservation:} Current federated learning research lacks comprehensive methods for validating whether theoretical diversity preservation translates into meaningful differences in real-world applications. The absence of physical validation systems means that claims about diversity preservation remain abstract and unverified, limiting confidence in the practical value of advanced federated learning approaches.
 
-The central research problem addressed in this thesis is: \textit{How can federated learning be adapted to preserve beneficial strategic diversity in chess reinforcement learning while still enabling collaborative knowledge transfer across distributed training nodes?}
+\textbf{Limited Human-Robot Interaction Design for Educational Applications:} Existing robotic chess systems focus primarily on mechanical execution rather than leveraging AI diversity for educational purposes. The lack of integration between advanced federated learning approaches and educational robotics represents a significant missed opportunity for creating more effective human-AI learning environments.
 
-This problem requires developing novel aggregation mechanisms that maintain the distinct strategic identities of different chess playing styles while facilitating the sharing of universal chess knowledge such as tactical motifs, endgame principles, and fundamental strategic concepts.
+\textbf{Theoretical Inconsistency with Domain Expertise:} The homogenization approach contradicts established chess theoretical frameworks maintained by grandmaster authorities, which recognize tactical, positional, and dynamic approaches as equally valid but strategically distinct paradigms \cite{matanovic1974encyclopedia,chess_opening_styles}. This inconsistency becomes particularly problematic when developing educational systems intended to teach chess concepts that depend on understanding strategic diversity.
+
+The central research problem addressed in this thesis is: \textit{How can federated learning be adapted to preserve beneficial strategic diversity in chess reinforcement learning while enabling collaborative knowledge transfer across distributed training nodes, and how can this diversity be validated and utilized through physical robotic systems that provide meaningful educational experiences for human learners?}
+
+This problem requires developing novel aggregation mechanisms that maintain the distinct strategic identities of different chess playing styles while facilitating the sharing of universal chess knowledge such as tactical motifs, endgame principles, and fundamental strategic concepts. Additionally, it requires creating comprehensive physical validation systems that demonstrate the practical value of preserved diversity through tangible human-robot interaction experiences that prove the educational and engagement benefits of maintaining strategic heterogeneity in federated learning systems.
 
 \section{Research Objectives and Questions}
 \label{sec:objectives}
@@ -37,93 +49,123 @@ This problem requires developing novel aggregation mechanisms that maintain the 
 \subsection{Primary Research Questions}
 \label{subsec:primary-questions}
 
-This research addresses four primary questions that collectively examine the feasibility and effectiveness of diversity-preserving federated learning in chess:
+This research addresses five primary questions that collectively examine the feasibility, effectiveness, and practical validation of diversity-preserving federated learning in chess through physical robotic demonstration:
 
-\textbf{RQ1: Style Preservation Feasibility}
-Can federated learning architectures be designed to preserve distinct chess playing styles while enabling collaborative learning across distributed nodes?
+\textbf{RQ1: Diversity-Preserving Federated Learning Feasibility}
+Can federated learning architectures be designed to preserve distinct chess playing styles while enabling collaborative learning across distributed nodes, and can this preservation be validated through measurable differences in decision-making patterns and strategic approaches?
 
-\textbf{RQ2: Knowledge Transfer Optimization}
-What is the optimal balance between style-specific knowledge preservation and universal chess knowledge sharing in a federated learning context?
+\textbf{RQ2: Knowledge Transfer Optimization in Heterogeneous Systems}
+What is the optimal balance between style-specific knowledge preservation and universal chess knowledge sharing in a federated learning context, and how can this balance be maintained when deploying trained models to physical robotic systems that interact with human learners?
 
-\textbf{RQ3: Performance vs. Diversity Trade-offs}
-How do diversity-preserving federated chess engines perform compared to traditional homogenized federated models and individual engines trained in isolation?
+\textbf{RQ3: Performance vs. Diversity Trade-offs in Physical Deployment}
+How do diversity-preserving federated chess engines perform compared to traditional homogenized federated models and individual engines trained in isolation, both in computational evaluations and when deployed in physical robotic systems that provide tangible gameplay experiences to human users?
 
-\textbf{RQ4: Clustering Strategy Effectiveness}
-Which clustering strategies most effectively group chess engines by playing style while maintaining intra-cluster learning benefits and inter-cluster knowledge transfer opportunities?
+\textbf{RQ4: Clustering Strategy Effectiveness for Educational Applications}
+Which clustering strategies most effectively group chess engines by playing style while maintaining intra-cluster learning benefits and inter-cluster knowledge transfer opportunities, and how do these clustering decisions impact the quality of educational experiences provided through physical robot deployment?
+
+\textbf{RQ5: Physical Validation and Human Learning Impact}
+Can physical chess-playing robots powered by diversity-preserving federated learning provide distinguishable and educationally valuable experiences that demonstrate the practical benefits of maintaining strategic heterogeneity in distributed AI systems, and how do these experiences compare to traditional single-style chess AI interactions?
 
 \subsection{Secondary Research Questions}
 \label{subsec:secondary-questions}
 
-Supporting the primary research objectives, several secondary questions explore specific aspects of the proposed approach:
+Supporting the primary research objectives, several secondary questions explore specific aspects of the integrated computational and physical system:
 
-\textbf{SQ1: Style Quantification Methods}
-How can chess playing styles be quantitatively measured and validated using both computational metrics and chess theoretical frameworks?
+\textbf{SQ1: Style Quantification and Physical Manifestation}
+How can chess playing styles be quantitatively measured and validated using both computational metrics and physical behavioral analysis through robotic gameplay, and what are the most reliable indicators that preserved diversity translates to genuine strategic differences in robot decision-making?
 
-\textbf{SQ2: Communication Efficiency}
-What are the communication overhead implications of clustered federated learning compared to standard federated approaches in chess training contexts?
+\textbf{SQ2: Communication Efficiency in Distributed Physical Systems}
+What are the communication overhead implications of clustered federated learning compared to standard federated approaches in chess training contexts, and how do these overheads impact real-time performance when models are deployed to physical robotic systems requiring responsive gameplay?
 
-\textbf{SQ3: Scalability Considerations}
-How does the proposed diversity-preserving approach scale with increasing numbers of participating nodes and playing style categories?
+\textbf{SQ3: Scalability Considerations for Educational Deployment}
+How does the proposed diversity-preserving approach scale with increasing numbers of participating nodes and playing style categories, and what are the practical limitations for deploying such systems in educational environments with multiple physical robots serving diverse learning needs?
 
-\textbf{SQ4: Generalization Beyond Chess}
-To what extent can the diversity-preserving federated learning principles identified in chess be generalized to other strategic domains with inherent style diversity?
+\textbf{SQ4: Human-Robot Interaction Quality and Style Recognition}
+How effectively can human players distinguish between different federated chess styles when interacting with physical robotic opponents, and what aspects of robot behavior most clearly communicate strategic differences to human learners across different skill levels?
 
-\textbf{SQ5: Human-AI Style Similarity}
-How closely do the preserved chess playing styles in federated engines correspond to recognized human playing style categories?
+\textbf{SQ5: Educational Effectiveness and Learning Outcomes}
+What measurable improvements in chess understanding and strategic thinking do human learners demonstrate when exposed to diverse federated chess styles through physical robot interaction compared to traditional chess learning methods or single-style AI opponents?
+
+\textbf{SQ6: Generalization Beyond Chess and Educational Applications}
+To what extent can the diversity-preserving federated learning principles identified in chess be generalized to other strategic domains with inherent style diversity, and how can physical validation approaches be adapted for different human-robot interaction contexts in educational and training applications?
 
 \section{Research Contributions}
 \label{sec:contributions}
 
-This thesis makes several novel contributions to the intersection of federated learning and reinforcement learning, with specific applications to chess artificial intelligence:
+This thesis makes several novel contributions that span artificial intelligence, federated learning theory, educational robotics, and human-computer interaction, establishing new paradigms for preserving beneficial diversity in distributed learning systems while providing tangible validation through physical deployment:
 
 \textbf{Theoretical Contributions:}
 \begin{itemize}
-\item Development of a formal framework for diversity-preserving federated reinforcement learning that balances style preservation with collaborative learning
-\item Mathematical formalization of style-based clustering criteria for strategic domains with inherent player diversity
-\item Theoretical analysis of convergence properties in heterogeneous federated reinforcement learning systems
+\item Development of a formal framework for diversity-preserving federated reinforcement learning that balances style preservation with collaborative learning, including mathematical convergence guarantees for heterogeneous multi-agent systems
+\item Mathematical formalization of style-based clustering criteria for strategic domains with inherent player diversity, with specific application to chess opening theory and strategic classification systems
+\item Theoretical analysis of convergence properties in heterogeneous federated reinforcement learning systems, demonstrating that beneficial diversity can be maintained without sacrificing learning effectiveness
+\item Novel theoretical bridge between federated learning optimization and educational robotics applications, establishing formal foundations for diversity-preserving AI in human-interactive systems
 \end{itemize}
 
 \textbf{Methodological Contributions:}
 \begin{itemize}
-\item Novel clustering-based federated learning architecture that preserves beneficial client heterogeneity
-\item Integration of domain-specific expert knowledge (grandmaster chess theory) with data-driven federated learning approaches
-\item Adaptive aggregation mechanisms that enable selective knowledge transfer while maintaining strategic diversity
-\item Comprehensive evaluation framework for measuring both performance and diversity preservation in federated learning systems
+\item Novel clustering-based federated learning architecture that preserves beneficial client heterogeneity while enabling selective knowledge transfer across strategically distinct agents
+\item Integration of domain-specific expert knowledge (grandmaster chess theory) with data-driven federated learning approaches, demonstrating how authoritative domain expertise can guide machine learning system design
+\item Adaptive aggregation mechanisms that enable selective knowledge transfer while maintaining strategic diversity, with specific protocols for balancing universal knowledge sharing with style-specific preservation
+\item Comprehensive three-phase training methodology (individual development, intra-cluster collaboration, inter-cluster knowledge transfer) that systematically builds and preserves strategic diversity
+\item Complete physical validation framework that bridges theoretical diversity preservation with tangible human-interactive demonstration through robotic systems
 \end{itemize}
 
 \textbf{Empirical Contributions:}
 \begin{itemize}
-\item First large-scale empirical study of diversity-preserving federated learning applied to chess reinforcement learning
-\item Demonstration that distinct chess playing styles can be maintained while achieving collaborative learning benefits
-\item Validation that preserved diversity leads to superior adaptive performance against varied opponents
-\item Comprehensive comparison of diversity-preserving approaches against traditional federated learning baselines
+\item First large-scale empirical study of diversity-preserving federated learning applied to chess reinforcement learning, with comprehensive validation across multiple playing styles and strategic approaches
+\item Demonstration that distinct chess playing styles can be maintained during federated training while achieving collaborative learning benefits that exceed isolated training approaches
+\item Validation that preserved diversity leads to superior adaptive performance against varied opponents, with statistical significance across multiple evaluation metrics
+\item Comprehensive comparison of diversity-preserving approaches against traditional federated learning baselines, individual training methods, and centralized training approaches
+\item First empirical validation of federated learning diversity through physical robotic deployment, providing concrete evidence that theoretical diversity preservation translates to meaningful real-world differences
+\item Human interaction studies demonstrating measurable learning improvements when engaging with diverse AI styles compared to homogenized chess engines
 \end{itemize}
 
-\textbf{Practical Contributions:}
+\textbf{Technical and System Contributions:}
 \begin{itemize}
-\item Open-source implementation of diversity-preserving federated chess learning system
-\item Reproducible experimental framework for evaluating federated learning in strategic domains
-\item Practical guidelines for applying diversity-preserving federated learning to other domains with inherent agent heterogeneity
-\item Chess education applications enabling human players to train against AI opponents with distinct, consistent playing styles
+\item Complete implementation of diversity-preserving federated chess learning system with open-source availability for research community adoption and extension
+\item First comprehensive physical chess robot system powered by federated learning, integrating computer vision, robotic manipulation, and human-interactive gameplay
+\item Advanced computer vision system for real-time chess board analysis and move recognition with 98.7\% accuracy in dynamic gameplay conditions
+\item Robust robotic control system for precise chess piece manipulation with integrated safety protocols for human-robot interaction
+\item Novel human-robot interaction protocols that enable style selection and educational feedback, transforming abstract AI concepts into tangible learning experiences
+\item Complete system integration framework that bridges high-level AI decision-making with low-level robotic control for seamless human-interactive gameplay
+\end{itemize}
+
+\textbf{Educational and Practical Contributions:}
+\begin{itemize}
+\item Reproducible experimental framework for evaluating federated learning in strategic domains with validation through physical deployment
+\item Practical guidelines for applying diversity-preserving federated learning to other domains with inherent agent heterogeneity, supported by concrete implementation examples
+\item Chess education applications enabling human players to train against AI opponents with distinct, consistent playing styles that provide varied learning experiences
+\item Demonstration of educational robotics applications that leverage AI diversity for enhanced learning outcomes, with measurable improvements in human chess understanding
+\item Complete open-source implementation enabling other researchers to build upon the diversity-preserving federated learning paradigm in both computational and physical contexts
+\item Practical framework for deploying diversity-aware AI systems in educational environments, with guidelines for human-robot interaction design and educational effectiveness measurement
+\end{itemize}
+
+\textbf{Interdisciplinary Contributions:}
+\begin{itemize}
+\item First comprehensive bridge between federated learning theory and educational robotics applications, establishing new research directions at the intersection of distributed AI and human-interactive systems
+\item Novel validation methodology that transforms abstract machine learning concepts into tangible, measurable human experiences through physical robot interaction
+\item Integration of chess domain expertise with cutting-edge AI research, demonstrating how traditional human knowledge can enhance modern machine learning approaches
+\item Establishment of new evaluation paradigms for federated learning that incorporate human-centered metrics alongside traditional computational performance measures
 \end{itemize}
 
 \section{Thesis Structure}
 \label{sec:structure}
 
-This thesis is organized into eight chapters that progress from theoretical foundations through implementation and evaluation to conclusions and future work:
+This thesis is organized into eight chapters that progress from theoretical foundations through implementation and physical validation to conclusions and future work, with integrated coverage of both computational federated learning advances and physical robotic demonstration:
 
-\textbf{Chapter 2: Literature Review and Related Work} provides comprehensive coverage of relevant research in federated learning, reinforcement learning, and chess artificial intelligence. Special attention is given to personalized and clustered federated learning approaches, horizontal federated reinforcement learning frameworks, and the theoretical foundations of chess playing style diversity.
+\textbf{Chapter 2: Literature Review and Related Work} provides comprehensive coverage of relevant research spanning federated learning, reinforcement learning, chess artificial intelligence, and educational robotics. Special attention is given to personalized and clustered federated learning approaches, horizontal federated reinforcement learning frameworks, the theoretical foundations of chess playing style diversity, and existing physical chess-playing robotic systems. The chapter establishes the interdisciplinary foundation necessary for understanding the integration of diversity-preserving federated learning with educational robotics applications.
 
-\textbf{Chapter 3: Methodology} establishes the epistemological foundation for treating grandmaster-maintained chess knowledge as authoritative academic sources, develops the chess playing style classification framework, and details the federated node clustering strategy. This chapter also specifies the individual node architecture, federated learning protocols, and comprehensive evaluation framework.
+\textbf{Chapter 3: Methodology} establishes the epistemological foundation for treating grandmaster-maintained chess knowledge as authoritative academic sources, develops the chess playing style classification framework grounded in opening theory analysis, and details the federated node clustering strategy. The chapter specifies the individual node architecture, federated learning protocols, and comprehensive evaluation framework. Additionally, it presents the complete methodology for physical chess robot integration, including computer vision systems, robotic control protocols, and human-robot interaction design that enables tangible validation of diversity preservation.
 
-\textbf{Chapter 4: System Implementation} documents the technical architecture and software implementation of the diversity-preserving federated chess learning system. Detailed descriptions of chess engine implementation, federated learning infrastructure, and evaluation tools provide the foundation for experimental reproducibility.
+\textbf{Chapter 4: System Implementation} documents the technical architecture and software implementation of both the diversity-preserving federated chess learning system and the integrated physical robotic demonstration platform. Detailed descriptions of chess engine implementation, federated learning infrastructure, computer vision systems, robotic control software, and human-robot interaction protocols provide the foundation for experimental reproducibility and system deployment in educational contexts.
 
-\textbf{Chapter 5: Experimental Design and Setup} defines the experimental objectives, dataset construction, and baseline establishment procedures. Comprehensive specification of experimental configurations and controlled variables ensures rigorous evaluation of the proposed approach.
+\textbf{Chapter 5: Experimental Design and Setup} defines the experimental objectives for both computational validation and physical robotic demonstration, dataset construction procedures, and baseline establishment protocols. Comprehensive specification of experimental configurations for federated learning, robotic system performance evaluation, and human interaction studies ensures rigorous evaluation of the proposed approach across both computational and physical validation domains.
 
-\textbf{Chapter 6: Results and Analysis} presents empirical findings from the three-phase training methodology, including individual style development, intra-cluster federated learning, and inter-cluster collaborative learning results. Comprehensive performance evaluation, ablation studies, and statistical significance testing validate the research hypotheses.
+\textbf{Chapter 6: Results and Analysis} presents empirical findings from the three-phase computational training methodology and comprehensive physical validation through robotic demonstration. Results include individual style development outcomes, intra-cluster and inter-cluster federated learning performance, robotic system execution accuracy, and human interaction study findings. Comprehensive performance evaluation, ablation studies, and statistical significance testing validate the research hypotheses across both computational and physical deployment contexts.
 
-\textbf{Chapter 7: Discussion} interprets the empirical findings within the broader context of federated learning and chess AI research. Theoretical implications, practical applications, methodology evaluation, and comparison with existing approaches provide comprehensive analysis of the research contributions.
+\textbf{Chapter 7: Discussion} interprets the empirical findings within the broader context of federated learning research, chess AI development, and educational robotics applications. The chapter analyzes theoretical implications for distributed learning systems, practical applications for educational technology, methodology evaluation across computational and physical domains, and integration challenges encountered when bridging AI research with robotic implementation. Comparison with existing approaches demonstrates the advantages and limitations of the diversity-preserving federated learning paradigm.
 
-\textbf{Chapter 8: Conclusions and Future Work} summarizes the research conclusions, contributions to knowledge, and limitations of the current work. Detailed future research directions and interdisciplinary applications suggest avenues for extending the diversity-preserving federated learning paradigm.
+\textbf{Chapter 8: Conclusions and Future Work} summarizes the research conclusions, contributions to knowledge spanning multiple disciplines, and limitations of the current work. Detailed future research directions encompass both computational extensions to the federated learning framework and advanced applications in educational robotics, with specific attention to commercial deployment possibilities and interdisciplinary applications that suggest avenues for extending the diversity-preserving federated learning paradigm to other domains requiring human-interactive AI systems.
 
-The thesis is supported by comprehensive appendices providing implementation details, additional results, and reproducibility guidelines to enable future research building upon these foundations.
+The thesis is supported by comprehensive appendices providing implementation details for both computational and robotic systems, additional results from human interaction studies, complete source code for reproducibility, and detailed documentation for physical robot assembly and deployment. These resources enable future research building upon the integrated computational and physical foundations established by this work, facilitating both theoretical advances in federated learning and practical applications in educational robotics.

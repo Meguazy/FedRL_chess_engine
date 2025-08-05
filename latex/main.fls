@@ -16,6 +16,16 @@ INPUT /usr/share/texlive/texmf-dist/tex/latex/setspace/setspace.sty
 INPUT /usr/share/texlive/texmf-dist/tex/latex/setspace/setspace.sty
 INPUT /usr/share/texlive/texmf-dist/tex/latex/base/inputenc.sty
 INPUT /usr/share/texlive/texmf-dist/tex/latex/base/inputenc.sty
+INPUT /usr/share/texlive/texmf-dist/tex/generic/babel/babel.sty
+INPUT /usr/share/texlive/texmf-dist/tex/generic/babel/babel.sty
+INPUT /usr/share/texlive/texmf-dist/tex/generic/babel/txtbabel.def
+INPUT /usr/share/texlive/texmf-dist/tex/generic/babel-english/english.ldf
+INPUT /usr/share/texlive/texmf-dist/tex/generic/babel-english/english.ldf
+INPUT /usr/share/texlive/texmf-dist/tex/generic/babel-english/english.ldf
+INPUT /usr/share/texlive/texmf-dist/tex/generic/babel/locale/en/babel-english.tex
+INPUT /usr/share/texlive/texmf-dist/tex/generic/babel/locale/en/babel-english.tex
+INPUT /usr/share/texlive/texmf-dist/tex/generic/babel/locale/en/babel-english.tex
+INPUT /usr/share/texlive/texmf-dist/tex/generic/babel/locale/en/babel-en.ini
 INPUT /usr/share/texlive/texmf-dist/tex/latex/geometry/geometry.sty
 INPUT /usr/share/texlive/texmf-dist/tex/latex/geometry/geometry.sty
 INPUT /usr/share/texlive/texmf-dist/tex/latex/graphics/keyval.sty
@@ -259,6 +269,8 @@ INPUT /usr/share/texlive/texmf-dist/tex/generic/pgf/frontendlayer/tikz/libraries
 INPUT /usr/share/texlive/texmf-dist/tex/generic/pgf/modules/pgfmoduledecorations.code.tex
 INPUT /usr/share/texlive/texmf-dist/tex/generic/pgf/libraries/decorations/pgflibrarydecorations.pathreplacing.code.tex
 INPUT /usr/share/texlive/texmf-dist/tex/generic/pgf/libraries/decorations/pgflibrarydecorations.pathreplacing.code.tex
+INPUT /usr/share/texlive/texmf-dist/tex/latex/sectsty/sectsty.sty
+INPUT /usr/share/texlive/texmf-dist/tex/latex/sectsty/sectsty.sty
 INPUT /usr/share/texlive/texmf-dist/tex/latex/tocbibind/tocbibind.sty
 INPUT /usr/share/texlive/texmf-dist/tex/latex/tocbibind/tocbibind.sty
 INPUT /usr/share/texlive/texmf-dist/tex/latex/tocloft/tocloft.sty
@@ -353,6 +365,11 @@ INPUT ./src/chapters/Chapter_1/chapter1.tex
 INPUT /usr/share/texlive/texmf-dist/fonts/tfm/public/cm/cmbx12.tfm
 INPUT /usr/share/texlive/texmf-dist/fonts/tfm/public/cm/cmti12.tfm
 INPUT /usr/share/texlive/texmf-dist/fonts/tfm/jknappen/ec/tcrm1200.tfm
+INPUT ./src/chapters/Chapter_2/chapter2_1.tex
+INPUT ./src/chapters/Chapter_2/chapter2_1.tex
+INPUT ./src/chapters/Chapter_2/chapter2_1.tex
+INPUT ./src/chapters/Chapter_2/chapter2_1.tex
+INPUT ./src/chapters/Chapter_2/chapter2_1.tex
 INPUT ./main.bbl
 INPUT ./main.bbl
 INPUT main.bbl

@@ -3,6 +3,7 @@
 \usepackage{setspace}
 \onehalfspacing
 \usepackage[utf8]{inputenc} % set input encoding (not needed with XeLaTeX)
+\usepackage[english]{babel} % ADDED: English language support
 \newcommand\floor[1]{\lfloor#1\rceil}
 \renewcommand\labelenumi{(\theenumi)}
 
@@ -15,6 +16,7 @@
 \geometry{a4paper} % or letterpaper (US) or a5paper or....
 \setlength{\headheight}{14.49998pt}
 \addtolength{\topmargin}{-2.49998pt}
+
 %%% BIBLIOGRAPHY
 %\usepackage{natbib}
 %\usepackage[babel]{csquotes}
@@ -102,6 +104,10 @@
 %\allsectionsfont{\sffamily\mdseries\upshape} % (See the fntguide.pdf for font help)
 % (This matches ConTeXt defaults)
 
+% SUBSECTION FORMATTING - Make subsections smaller
+\usepackage{sectsty}
+\subsectionfont{\large}  % Makes subsections \large instead of \Large
+
 %%% ToC (table of contents) APPEARANCE
 \usepackage[nottoc,notlof,notlot]{tocbibind} % Put the bibliography in the ToC
 \usepackage[titles,subfigure]{tocloft} % Alter the style of the Table of Contents
@@ -109,7 +115,7 @@
 \renewcommand{\cftsecpagefont}{\rmfamily\mdseries\upshape} % No bold!
 
 %%%	PATH for images
-\graphicspath{{./images/}}  % CHANGED: ./immagini/ -> ./images/
+\graphicspath{{./images/}}  % Path for images
 
 %format title of section
 %\usepackage{titlesec} % Used to customize the \section command
@@ -122,7 +128,7 @@
 \numberwithin{equation}{chapter}
 
 \theoremstyle{plain}
-% CHANGED: All theorem environments translated to English
+% All theorem environments in English
 \newtheorem{Theorem}{Theorem}[chapter]
 \newtheorem{Lemma}[Theorem]{Lemma}
 \newtheorem{Proposition}[Theorem]{Proposition}
@@ -143,7 +149,6 @@
 %-------------------------------------------------------------------
 %	DOCUMENT START
 %-------------------------------------------------------------------
-%
 
 \begin{document}
 \fncyfront
@@ -161,17 +166,30 @@
 \fncymain
 \mainmatter % SET MAIN LAYOUT STYLE
 
-
-
 % CHAPTERS
 \input{./src/chapters/Chapter_1/chapter1.tex}
 
-% APPENDIXES
-% BIBLIOGRAPHY
+% Add more chapters here as needed:
+% 
+\chapter{Literature Review and Related Work}
+\input{./src/chapters/Chapter_2/chapter2_1}
+% \input{./src/chapters/Chapter_3/chapter3.tex}
+% \input{./src/chapters/Chapter_4/chapter4.tex}
+% \input{./src/chapters/Chapter_5/chapter5.tex}
+% \input{./src/chapters/Chapter_6/chapter6.tex}
+% \input{./src/chapters/Chapter_7/chapter7.tex}
+% \input{./src/chapters/Chapter_8/chapter8.tex}
 
-\bibliographystyle{abbrv}
+% APPENDIXES
+% \appendix
+% \input{./src/appendices/appendixA.tex}
+% \input{./src/appendices/appendixB.tex}
+
+% BIBLIOGRAPHY
+\bibliographystyle{ieeetr}
 \bibliography{./src/bibliography}
 
+% Acknowledgements
+% \input{./src/acknowledgements.tex}
 
-% Acknowledgements  % CHANGED: Ringraziamenti -> Acknowledgements
 \end{document}
