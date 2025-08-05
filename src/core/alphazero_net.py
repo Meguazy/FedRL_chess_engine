@@ -7,6 +7,7 @@ Referenced papers:
 PAPER: Mastering Chess and Shogi by Self-Play with a General Reinforcement Learning Algorithm
 PAPER: Mastering the game of Go without human knowledge
 PAPER: A general reinforcement learning algorithm that masters chess, shogi, and Go through self-play
+SITE: https://nikcheerla.github.io/deeplearningschool/2018/01/01/AlphaZero-Explained/
 """
 
 import torch
