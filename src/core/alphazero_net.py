@@ -4,9 +4,9 @@ AlphaZero Neural Network Architecture
 This module defines the neural network architecture used in AlphaZero.
 
 Referenced papers:
-Mastering Chess and Shogi by Self-Play with a General Reinforcement Learning Algorithm
-Mastering the game of Go without human knowledge
-A general reinforcement learning algorithm that masters chess, shogi, and Go through self-play
+PAPER: Mastering Chess and Shogi by Self-Play with a General Reinforcement Learning Algorithm
+PAPER: Mastering the game of Go without human knowledge
+PAPER: A general reinforcement learning algorithm that masters chess, shogi, and Go through self-play
 """
 
 import torch
