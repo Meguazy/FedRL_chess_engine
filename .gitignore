@@ -60,7 +60,7 @@ src/explainability/
 src/federated/
 src/scripts/
 src/utils/
-./docs/
+/docs/
 
 # Temporary ignored files
 src/training/reward_shaping.py
