@@ -45,6 +45,7 @@ data/models/*.pth
 data/models/*.pt
 *.pgn
 *.log
+appunti.txt
 
 # OS
 .DS_Store
