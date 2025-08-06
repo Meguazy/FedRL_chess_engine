@@ -52,7 +52,8 @@ appunti.txt
 Thumbs.db
 
 # Temporary ignored folders
-src/data/
+src/data/models/
+src/data/test_positions/
 src/docs/
 src/tests/
 src/evaluation/
