@@ -12,6 +12,7 @@ import torch.nn.functional as F
 import chess
 import numpy as np
 import logging
+import time
 from typing import List, Dict, Optional, Any, Tuple
 from dataclasses import dataclass
 import random
@@ -41,20 +42,24 @@ class StyleSpecificSelfPlay:
     This creates training data biased toward tactical, positional, or dynamic styles.
     """
     
-    def __init__(self, device: str = 'cuda'):
+    def __init__(self, device: str = 'cuda', logger: logging.Logger = None):
         """
         Initialize style-specific self-play generator.
         
         Args:
             device: PyTorch device for neural network inference
+            logger: Logger instance to use (if None, creates its own)
         """
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         
         # Initialize ECO opening database
         self.opening_db = ECO_OpeningDatabase()
         
-        # Setup logging
-        self.logger = logging.getLogger(f"StyleSpecificSelfPlay_{id(self)}")
+        # Setup logging - use provided logger or create own
+        if logger is not None:
+            self.logger = logger
+        else:
+            self.logger = logging.getLogger(f"StyleSpecificSelfPlay_{id(self)}")
         
         # Statistics tracking
         self.games_generated = 0
@@ -93,13 +98,16 @@ class StyleSpecificSelfPlay:
         self.logger.info(f"Generating {num_games} {style} style games with {mcts_simulations} MCTS sims")
         
         # Create MCTS engine for this model
+        self.logger.info(f"Creating MCTS engine for {style} style games...")
         mcts_engine = AlphaZeroMCTS(model, c_puct=1.0, device=self.device)
+        self.logger.info(f"MCTS engine created successfully")
         
         all_training_examples = []
         successful_games = 0
         
         for game_idx in range(num_games):
             try:
+                self.logger.info(f"Starting game {game_idx + 1}/{num_games} ({style} style)")
                 # Generate single self-play game with style-specific opening
                 game_result = self._generate_single_game(
                     mcts_engine=mcts_engine,
@@ -113,6 +121,7 @@ class StyleSpecificSelfPlay:
                 if game_result and game_result.training_examples:
                     all_training_examples.extend(game_result.training_examples)
                     successful_games += 1
+                    self.logger.info(f"Game {game_idx + 1} completed successfully - {len(game_result.training_examples)} examples, {game_result.game_length} moves")
                     
                     # Update statistics
                     self.style_stats[style]['games'] += 1
@@ -120,6 +129,8 @@ class StyleSpecificSelfPlay:
                     games_count = self.style_stats[style]['games']
                     new_avg = ((current_avg * (games_count - 1)) + game_result.game_length) / games_count
                     self.style_stats[style]['avg_length'] = new_avg
+                else:
+                    self.logger.warning(f"Game {game_idx + 1} failed to generate valid training examples")
                     
                     if game_result.opening_used:
                         self.openings_used[game_result.opening_used] = self.openings_used.get(game_result.opening_used, 0) + 1
@@ -162,7 +173,13 @@ class StyleSpecificSelfPlay:
         training_examples = []
         current_position = initial_position.clone()
         move_count = 0
-        max_moves = 200  # Prevent infinite games
+        max_moves = 80  # Prevent infinite games - increased from 200 to allow more natural endings
+        
+        # Resignation parameters
+        resign_threshold = 0.15  # Resign if win probability < 15% (less aggressive)
+        resign_earliest_move = 20  # Don't resign before move 20
+        consecutive_bad_evals = 0  # Track consecutive bad evaluations
+        resign_consistency_required = 5  # Need 5 consecutive bad evals to resign (more conservative)
         
         # Track game state for style adherence calculation
         opening_moves_played = len(opening.moves) if opening else 0
@@ -176,11 +193,17 @@ class StyleSpecificSelfPlay:
             
             # Get move probabilities from MCTS
             try:
+                move_start_time = time.time()
                 action_probs = mcts_engine.get_action_probabilities(
                     current_position,
                     num_simulations=mcts_simulations,
                     temperature=temperature
                 )
+                move_time = time.time() - move_start_time
+                
+                # Log timing every 10 moves to avoid spam
+                if move_count % 10 == 0:
+                    self.logger.info(f"Move {move_count}: {move_time:.2f}s ({mcts_simulations} sims)")
                 
                 if not action_probs:
                     break  # No legal moves
@@ -188,6 +211,47 @@ class StyleSpecificSelfPlay:
                 # Add Dirichlet noise to root node for exploration
                 if move_count < temperature_moves:
                     action_probs = self._add_dirichlet_noise(action_probs, dirichlet_alpha)
+                
+                # Check for resignation (if enabled and past earliest move)
+                if move_count >= resign_earliest_move:
+                    # Get current position evaluation from MCTS value
+                    # We can estimate this from the neural network or use a simple heuristic
+                    root_node = mcts_engine.search(current_position, mcts_simulations)
+                    position_value = root_node.value_sum / max(root_node.visit_count, 1)
+                    
+                    # Convert neural network value to win probability (roughly)
+                    # Neural network outputs are in [-1, 1], convert to [0, 1]
+                    win_probability = (position_value + 1.0) / 2.0
+                    
+                    # Check if position is resignable
+                    if win_probability < resign_threshold or win_probability > (1.0 - resign_threshold):
+                        consecutive_bad_evals += 1
+                        if consecutive_bad_evals >= resign_consistency_required:
+                            # Resign the game
+                            final_reward = -1.0 if win_probability < resign_threshold else 1.0
+                            # Adjust for current player perspective
+                            if current_position.get_current_player() == -1:  # Black to move
+                                final_reward = -final_reward
+                            
+                            termination_reason = f"resignation(eval={win_probability:.3f},threshold={resign_threshold})"
+                            self.logger.info(f"Game {game_id} resigned after {move_count} moves: {termination_reason}")
+                            
+                            # Update training examples with resignation outcome
+                            for i, example in enumerate(training_examples):
+                                if example.current_player == current_position.get_current_player():
+                                    example.outcome = final_reward
+                                else:
+                                    example.outcome = -final_reward
+                            
+                            return SelfPlayGameResult(
+                                training_examples=training_examples,
+                                game_length=move_count,
+                                final_result=final_reward,
+                                opening_used=opening.name if opening else None,
+                                style_adherence=min(opening_moves_played / max(move_count, 1), 1.0) if opening else 0.0
+                            )
+                    else:
+                        consecutive_bad_evals = 0  # Reset counter
                 
                 # Create training example
                 training_example = AlphaZeroTrainingExample(
@@ -219,9 +283,11 @@ class StyleSpecificSelfPlay:
         # Determine final game result
         if current_position.is_terminal():
             final_reward = current_position.get_reward()
+            termination_reason = "natural"
         else:
             # Game didn't finish naturally - treat as draw
             final_reward = 0.0
+            termination_reason = f"move_limit({max_moves})"
         
         # Update all training examples with final outcome
         for i, example in enumerate(training_examples):
@@ -230,6 +296,10 @@ class StyleSpecificSelfPlay:
                 example.outcome = final_reward
             else:
                 example.outcome = -final_reward
+        
+        # Debug: Log game outcome for analysis
+        outcome_str = "White wins" if final_reward == 1.0 else "Black wins" if final_reward == -1.0 else "Draw"
+        self.logger.info(f"Game outcome: {outcome_str} (final_reward={final_reward}) - {termination_reason}")
         
         # Calculate style adherence (simplified - based on opening usage)
         style_adherence = min(opening_moves_played / max(move_count, 1), 1.0) if opening else 0.0

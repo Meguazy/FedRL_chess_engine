@@ -1,6 +1,5 @@
 # src/core/game_utils.py
 from abc import ABC, abstractmethod
-from src.core.alphazero_mcts import ChessGameState
 import chess
 import torch
 import numpy as np
@@ -212,19 +211,17 @@ class ChessPosition(ChessGameState):
         
         # 2. Repetition counts (8 channels)
         # Calculate position repetitions for each historical position
-        current_fen = self.board.fen().split(' ')[0]  # Get board position part of FEN
+        # Pre-compute position FENs for efficiency
+        position_fens = [pos.fen().split(' ')[0] for pos in all_positions]
         
         for time_step in range(8):
             channel = 96 + time_step
             
             if time_step < len(all_positions):
-                position_fen = all_positions[time_step].fen().split(' ')[0]
+                position_fen = position_fens[time_step]
                 
-                # Count how many times this position appears in history
-                repetition_count = 0
-                for hist_board in all_positions:
-                    if hist_board.fen().split(' ')[0] == position_fen:
-                        repetition_count += 1
+                # Count how many times this position appears in history (using pre-computed FENs)
+                repetition_count = position_fens.count(position_fen)
                 
                 # Normalize repetition count (typically 1, 2, or 3)
                 normalized_count = min(repetition_count / 3.0, 1.0)

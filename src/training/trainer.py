@@ -12,15 +12,13 @@ import json
 import logging
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.multiprocessing as mp
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Tuple
 from datetime import datetime
-import os
 import queue
 import time
-import signal
-import sys
 
 from ..core.alphazero_net import AlphaZeroNet
 
@@ -30,6 +28,48 @@ try:
 except ImportError:
     TENSORBOARD_AVAILABLE = False
     print("Warning: TensorBoard not available. Install with: pip install tensorboard")
+
+
+def _global_training_worker(trainer_config: Dict[str, Any], job: Dict[str, Any], 
+                           max_iterations: int, save_frequency: int,
+                           memory_offset: int, progress_queue: mp.Queue, 
+                           checkpoint_queue: mp.Queue, error_queue: mp.Queue) -> None:
+    """
+    Global worker function for multiprocessing.
+    
+    This function recreates a trainer instance in the worker process and calls
+    the actual training logic. This avoids pickling issues with instance methods.
+    
+    Args:
+        trainer_config: Configuration needed to recreate trainer
+        job: Training job configuration
+        max_iterations: Maximum number of training iterations
+        save_frequency: How often to save checkpoints
+        memory_offset: GPU memory offset for this worker
+        progress_queue: Queue for progress updates
+        checkpoint_queue: Queue for checkpoint notifications
+        error_queue: Queue for error reporting
+    """
+    try:
+        # Create a minimal trainer instance in the worker process
+        trainer = ParallelTrainer(
+            config_dir=trainer_config['config_dir'],
+            device=trainer_config['device'],
+            clear_logs=False,  # Don't clear logs in worker processes
+            setup_logging=False  # Don't setup parallel trainer logging in workers
+        )
+        
+        # Set additional attributes from the config
+        trainer.memory_per_process = trainer_config['memory_per_process']
+        trainer.tensorboard_dir = Path(trainer_config['tensorboard_dir'])
+        
+        # Call the actual worker method
+        trainer._training_worker_impl(
+            job, max_iterations, save_frequency, memory_offset,
+            progress_queue, checkpoint_queue, error_queue
+        )
+    except Exception as e:
+        error_queue.put({'job_id': job.get('job_id', 'unknown'), 'error': str(e)})
 
 
 class ParallelTrainer:
@@ -43,20 +83,31 @@ class ParallelTrainer:
     - Adaptive learning rate scheduling
     """
     
-    def __init__(self, config_dir: str = "src/experiments/configs", device: str = "cuda"):
+    def __init__(self, config_dir: str = "src/experiments/configs", device: str = "cuda", clear_logs: bool = True, setup_logging: bool = True):
         """
         Initialize the ParallelTrainer for multi-model training.
         
         Args:
             config_dir: Directory containing JSON configuration files
             device: PyTorch device for training ("cuda" or "cpu")
+            clear_logs: Whether to clear existing logs (only for main process)
+            setup_logging: Whether to setup logging (False for worker processes)
         """
         self.config_dir = Path(config_dir)
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         
-        # Setup logging
-        self.logger = self._setup_logging()
-        self.logger.info(f"Initializing ParallelTrainer on device: {self.device}")
+        # Clear existing logs only if requested (main process only)
+        if clear_logs:
+            self._clear_existing_logs()
+        
+        # Setup logging only if requested
+        if setup_logging:
+            self.logger = self._setup_logging()
+            self.logger.info(f"Initializing ParallelTrainer on device: {self.device}")
+        else:
+            # For worker processes, create a minimal logger that doesn't create files
+            self.logger = logging.getLogger(f"ParallelTrainer_Worker_{id(self)}")
+            self.logger.setLevel(logging.INFO)
         
         # Load configurations automatically
         self.configs = self._load_experiment_configs()
@@ -218,24 +269,25 @@ class ParallelTrainer:
                 raise ValueError(f"Required training config '{training}' not found in configuration")
         
         # Create 3 small models with standard training
-        styles = ['tactical', 'positional', 'dynamic']
-        for i, style in enumerate(styles):
-            combinations.append({
-                'job_id': f'small_{style}_{i+1}',
-                'model_size': 'small',
-                'training_config': 'standard',
-                'style': style,
-                'description': f'Small model with {style} style using standard training'
-            })
+        #styles = ['tactical', 'positional', 'dynamic']
+        styles = ['positional']
+        # for i, style in enumerate(styles):
+        #     combinations.append({
+        #         'job_id': f'small_{style}_{i+1}',
+        #         'model_size': 'small',
+        #         'training_config': 'standard',
+        #         'style': style,
+        #         'description': f'Small model with {style} style using standard training'
+        #     })
         
         # Create 3 micro models with prototype training  
         for i, style in enumerate(styles):
             combinations.append({
                 'job_id': f'micro_{style}_{i+1}',
                 'model_size': 'micro', 
-                'training_config': 'prototype',
+                'training_config': 'fast',
                 'style': style,
-                'description': f'Micro model with {style} style using prototype training'
+                'description': f'Micro model with {style} style using fast training'
             })
         
         self.logger.info(f"Created {len(combinations)} default training combinations")
@@ -293,6 +345,36 @@ class ParallelTrainer:
         
         return training_jobs
     
+    def _clear_existing_logs(self) -> None:
+        """
+        Clear existing log files to start fresh.
+        """
+        log_dir = Path("logs")
+        if log_dir.exists():
+            # Remove worker logs
+            for log_file in log_dir.glob("worker_*.log"):
+                try:
+                    log_file.unlink()
+                except Exception:
+                    pass  # Ignore errors if file is locked or doesn't exist
+            
+            # Remove parallel trainer logs
+            for log_file in log_dir.glob("parallel_trainer_*.log"):
+                try:
+                    log_file.unlink()
+                except Exception:
+                    pass
+        
+        # Clear TensorBoard logs
+        tensorboard_dir = Path("logs/tensorboard")
+        if tensorboard_dir.exists():
+            import shutil
+            try:
+                shutil.rmtree(tensorboard_dir)
+                tensorboard_dir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass  # Ignore errors if directory is locked
+
     def _setup_logging(self) -> logging.Logger:
         """
         Setup logging for the parallel trainer.
@@ -314,12 +396,18 @@ class ParallelTrainer:
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
         
-        # File handler
+        # File handler with immediate flushing
         log_dir = Path("logs")
         log_dir.mkdir(exist_ok=True)
         
         log_file = log_dir / f"parallel_trainer_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-        file_handler = logging.FileHandler(log_file)
+        
+        class FlushingFileHandler(logging.FileHandler):
+            def emit(self, record):
+                super().emit(record)
+                self.flush()
+        
+        file_handler = FlushingFileHandler(log_file)
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
@@ -376,9 +464,17 @@ class ParallelTrainer:
                 memory_offset = i * self.memory_per_process
                 
                 # Create process for this training job
+                trainer_config = {
+                    'config_dir': self.config_dir,
+                    'device': self.device,
+                    'memory_per_process': self.memory_per_process,
+                    'tensorboard_dir': str(self.tensorboard_dir)
+                }
+                
                 process = mp.Process(
-                    target=self._training_worker,
+                    target=_global_training_worker,
                     args=(
+                        trainer_config,
                         job,
                         max_iterations,
                         save_frequency,
@@ -454,11 +550,11 @@ class ParallelTrainer:
         if memory_per_process_gb < 1.0:
             self.logger.warning(f"Low memory per process ({memory_per_process_gb:.2f}GB) - consider reducing model sizes")
     
-    def _training_worker(self, job: Dict[str, Any], max_iterations: int, save_frequency: int,
-                        memory_offset: int, progress_queue: mp.Queue, 
-                        checkpoint_queue: mp.Queue, error_queue: mp.Queue) -> None:
+    def _training_worker_impl(self, job: Dict[str, Any], max_iterations: int, save_frequency: int,
+                             memory_offset: int, progress_queue: mp.Queue, 
+                             checkpoint_queue: mp.Queue, error_queue: mp.Queue) -> None:
         """
-        Worker process for training a single model.
+        Implementation of the training worker logic.
         
         Runs in separate process with isolated GPU memory, independent training loop,
         and dedicated TensorBoard logging.
@@ -516,7 +612,7 @@ class ParallelTrainer:
             
             # Import self-play functionality
             from .self_play import StyleSpecificSelfPlay
-            self_play_coordinator = StyleSpecificSelfPlay(device=self.device)
+            self_play_coordinator = StyleSpecificSelfPlay(device=self.device, logger=worker_logger)
             
             worker_logger.info(f"Worker {job_id} initialized - starting training loop")
             
@@ -528,9 +624,12 @@ class ParallelTrainer:
             # Independent training loop for this model
             for iteration in range(max_iterations):
                 iteration_start = time.time()
+                worker_logger.info(f"Starting iteration {iteration + 1}/{max_iterations}")
                 
                 try:
                     # Generate self-play training data
+                    worker_logger.info(f"Starting self-play data generation...")
+                    worker_logger.info(f"Target: {job['games_per_iteration']} games with {job['mcts_simulations']} MCTS sims each")
                     games_start = time.time()
                     training_examples = self_play_coordinator.generate_training_examples(
                         model=model,
@@ -542,21 +641,28 @@ class ParallelTrainer:
                     )
                     games_time = time.time() - games_start
                     games_per_second = job['games_per_iteration'] / games_time if games_time > 0 else 0
+                    worker_logger.info(f"Self-play completed in {games_time:.2f}s ({games_per_second:.2f} games/sec)")
+                    worker_logger.info(f"Generated {len(training_examples)} training examples")
                     games_per_second_history.append(games_per_second)
                     
                     # Train model on generated data
+                    worker_logger.info(f"Starting neural network training on {len(training_examples)} examples...")
                     training_start = time.time()
                     loss_dict = self._worker_train_model_detailed(model, optimizer, training_examples, job)
                     training_time = time.time() - training_start
+                    worker_logger.info(f"Neural network training completed in {training_time:.2f}s")
                     
                     total_loss = loss_dict['total_loss']
                     policy_loss = loss_dict['policy_loss']
                     value_loss = loss_dict['value_loss']
+                    worker_logger.info(f"Training losses - Total: {total_loss:.4f}, Policy: {policy_loss:.4f}, Value: {value_loss:.4f}")
                     
                     # Update learning rate scheduler
                     old_lr = optimizer.param_groups[0]['lr']
                     scheduler.step(total_loss)
                     new_lr = optimizer.param_groups[0]['lr']
+                    if old_lr != new_lr:
+                        worker_logger.info(f"Learning rate updated: {old_lr:.2e} -> {new_lr:.2e}")
                     
                     # Track best loss
                     if total_loss < best_loss:
@@ -889,14 +995,27 @@ class ParallelTrainer:
         logger = logging.getLogger(f"Worker-{job_id}")
         logger.setLevel(logging.INFO)
         
-        # File handler for this worker
+        # Clear any existing handlers to avoid duplicates
+        for handler in logger.handlers[:]:
+            logger.removeHandler(handler)
+        
+        # Create custom handler that flushes immediately
+        class FlushingFileHandler(logging.FileHandler):
+            def emit(self, record):
+                super().emit(record)
+                self.flush()
+        
+        # File handler for this worker with immediate flushing
         log_file = Path("logs") / f"worker_{job_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         log_file.parent.mkdir(exist_ok=True)
         
-        file_handler = logging.FileHandler(log_file)
+        file_handler = FlushingFileHandler(log_file)
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
+        
+        # Store the log file path in the logger for reference
+        logger.log_file_path = log_file
         
         return logger
     
@@ -937,9 +1056,7 @@ class ParallelTrainer:
         """Train model in worker process."""
         if not training_examples:
             return 0.0
-            
-        import torch.nn.functional as F
-        
+                    
         model.train()
         total_loss = 0.0
         num_batches = 0
@@ -1032,6 +1149,14 @@ class ParallelTrainer:
                 # Forward pass
                 policy_logits, values = model(states)
                 values = values.squeeze()
+                
+                # Debug: Log value targets and predictions for analysis
+                if num_batches == 0:  # Only log first batch to avoid spam
+                    value_targets_np = value_targets.detach().cpu().numpy()
+                    values_np = values.detach().cpu().numpy()
+                    unique_targets = set(value_targets_np.round(3))
+                    self.logger.info(f"Batch 0: Value targets range [{value_targets_np.min():.3f}, {value_targets_np.max():.3f}], unique values: {unique_targets}")
+                    self.logger.info(f"Batch 0: Value predictions range [{values_np.min():.3f}, {values_np.max():.3f}]")
                 
                 # Compute losses separately
                 policy_loss = F.cross_entropy(policy_logits, policy_targets)

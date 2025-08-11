@@ -59,7 +59,6 @@ src/tests/
 src/evaluation/
 src/explainability/
 src/federated/
-src/scripts/
 src/utils/
 /docs/
 
