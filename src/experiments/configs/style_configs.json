@@ -1,0 +1,38 @@
+{
+  "prototype": {
+    "initial_learning_rate": 0.01,
+    "lr_scheduler": "ReduceLROnPlateau",
+    "lr_factor": 0.1,
+    "lr_patience": 5,
+    "batch_size": 16,
+    "mcts_simulations": 200,
+    "games_per_iteration": 10,
+    "dirichlet_alpha": 0.3,
+    "temperature_moves": 20,
+    "description": "Fast prototyping with reduced parameters"
+  },
+  "standard": {
+    "initial_learning_rate": 0.001,
+    "lr_scheduler": "ReduceLROnPlateau",
+    "lr_factor": 0.1,
+    "lr_patience": 10,
+    "batch_size": 32,
+    "mcts_simulations": 400,
+    "games_per_iteration": 25,
+    "dirichlet_alpha": 0.3,
+    "temperature_moves": 30,
+    "description": "Balanced training for proof of concept"
+  },
+  "thorough": {
+    "initial_learning_rate": 0.0005,
+    "lr_scheduler": "ReduceLROnPlateau",
+    "lr_factor": 0.1,
+    "lr_patience": 15,
+    "batch_size": 64,
+    "mcts_simulations": 800,
+    "games_per_iteration": 50,
+    "dirichlet_alpha": 0.3,
+    "temperature_moves": 30,
+    "description": "Comprehensive training when resources allow"
+  }
+}

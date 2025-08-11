@@ -1,0 +1,1316 @@
+"""
+Parallel Trainer for Multi-Model AlphaZero Training
+
+This module provides TRUE parallel training capabilities for multiple AlphaZero models
+with different sizes and styles, using multiprocessing for concurrent training.
+Includes comprehensive TensorBoard logging for real-time monitoring.
+
+Author: Francesco Finucci
+"""
+
+import json
+import logging
+import torch
+import torch.nn as nn
+import torch.multiprocessing as mp
+from pathlib import Path
+from typing import Dict, List, Any, Optional, Tuple
+from datetime import datetime
+import os
+import queue
+import time
+import signal
+import sys
+
+from ..core.alphazero_net import AlphaZeroNet
+
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    TENSORBOARD_AVAILABLE = True
+except ImportError:
+    TENSORBOARD_AVAILABLE = False
+    print("Warning: TensorBoard not available. Install with: pip install tensorboard")
+
+
+class ParallelTrainer:
+    """
+    Manages parallel training of multiple AlphaZero models with different sizes and styles.
+    
+    Handles:
+    - Multi-model resource allocation across 24GB VRAM
+    - Self-play coordination with style-specific engines
+    - Checkpointing and monitoring
+    - Adaptive learning rate scheduling
+    """
+    
+    def __init__(self, config_dir: str = "src/experiments/configs", device: str = "cuda"):
+        """
+        Initialize the ParallelTrainer for multi-model training.
+        
+        Args:
+            config_dir: Directory containing JSON configuration files
+            device: PyTorch device for training ("cuda" or "cpu")
+        """
+        self.config_dir = Path(config_dir)
+        self.device = torch.device(device if torch.cuda.is_available() else "cpu")
+        
+        # Setup logging
+        self.logger = self._setup_logging()
+        self.logger.info(f"Initializing ParallelTrainer on device: {self.device}")
+        
+        # Load configurations automatically
+        self.configs = self._load_experiment_configs()
+        self.logger.info(f"Loaded {len(self.configs['model_sizes'])} model sizes and {len(self.configs['training_configs'])} training configs")
+        
+        # Initialize containers for training components
+        self.models: Dict[str, AlphaZeroNet] = {}
+        self.optimizers: Dict[str, torch.optim.Optimizer] = {}
+        self.schedulers: Dict[str, torch.optim.lr_scheduler.ReduceLROnPlateau] = {}
+        self.training_states: Dict[str, Dict[str, Any]] = {}
+        
+        # Resource tracking
+        self.gpu_memory_allocated = 0
+        self.max_gpu_memory = torch.cuda.get_device_properties(0).total_memory if torch.cuda.is_available() else 0
+        
+        # Training tracking
+        self.training_started = False
+        self.checkpoint_dir = Path("checkpoints")
+        self.checkpoint_dir.mkdir(exist_ok=True)
+        
+        # TensorBoard setup
+        self.tensorboard_dir = Path("logs/tensorboard")
+        self.tensorboard_dir.mkdir(parents=True, exist_ok=True)
+        self.logger.info(f"TensorBoard logs will be saved to: {self.tensorboard_dir}")
+        
+        if not TENSORBOARD_AVAILABLE:
+            self.logger.warning("TensorBoard not available - install with: pip install tensorboard")
+        else:
+            self.logger.info("TensorBoard integration enabled")
+        
+        # Setup default training combination (3 small + standard, 3 micro + prototype)
+        self.default_training_jobs = self._create_default_training_jobs()
+        self.logger.info(f"Created {len(self.default_training_jobs)} default training jobs")
+    
+    def _load_experiment_configs(self) -> Dict[str, Any]:
+        """
+        Load all experiment configurations from JSON files (private method).
+        
+        Returns:
+            Dictionary containing:
+            - model_sizes: Architecture configurations (nano, micro, small, etc.)
+            - training_configs: Training parameter sets (prototype, standard, thorough)
+            - default_combinations: Predefined model+training combinations
+        
+        Raises:
+            FileNotFoundError: If config files are missing
+            ValueError: If config structure is invalid
+        """
+        configs = {
+            'model_sizes': {},
+            'training_configs': {},
+            'default_combinations': []
+        }
+        
+        # Load model sizes configuration
+        model_sizes_path = self.config_dir / "model_sizes.json"
+        if not model_sizes_path.exists():
+            raise FileNotFoundError(f"Model sizes config not found: {model_sizes_path}")
+        
+        try:
+            with open(model_sizes_path, 'r') as f:
+                configs['model_sizes'] = json.load(f)
+            self.logger.info(f"Loaded model sizes: {list(configs['model_sizes'].keys())}")
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in model sizes config: {e}")
+        
+        # Load training configurations
+        training_configs_path = self.config_dir / "training_configs.json"
+        if not training_configs_path.exists():
+            raise FileNotFoundError(f"Training configs not found: {training_configs_path}")
+        
+        try:
+            with open(training_configs_path, 'r') as f:
+                configs['training_configs'] = json.load(f)
+            self.logger.info(f"Loaded training configs: {list(configs['training_configs'].keys())}")
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in training configs: {e}")
+        
+        # Validate configurations
+        self._validate_configs(configs)
+        
+        # Create default combinations
+        configs['default_combinations'] = self._create_default_combinations(configs)
+        
+        return configs
+    
+    def _validate_configs(self, configs: Dict[str, Any]) -> None:
+        """
+        Validate that configurations have required fields and valid values.
+        
+        Args:
+            configs: Configuration dictionary to validate
+            
+        Raises:
+            ValueError: If required fields are missing or invalid
+        """
+        # Validate model sizes
+        for model_name, model_config in configs['model_sizes'].items():
+            required_fields = ['filters', 'blocks', 'description']
+            for field in required_fields:
+                if field not in model_config:
+                    raise ValueError(f"Model {model_name} missing required field: {field}")
+            
+            # Validate numeric values
+            if not isinstance(model_config['filters'], int) or model_config['filters'] <= 0:
+                raise ValueError(f"Model {model_name} has invalid filters value: {model_config['filters']}")
+            
+            if not isinstance(model_config['blocks'], int) or model_config['blocks'] <= 0:
+                raise ValueError(f"Model {model_name} has invalid blocks value: {model_config['blocks']}")
+        
+        # Validate training configs
+        for training_name, training_config in configs['training_configs'].items():
+            required_fields = ['initial_learning_rate', 'lr_scheduler', 'batch_size', 'mcts_simulations']
+            for field in required_fields:
+                if field not in training_config:
+                    raise ValueError(f"Training config {training_name} missing required field: {field}")
+            
+            # Validate learning rate
+            lr = training_config['initial_learning_rate']
+            if not isinstance(lr, (int, float)) or lr <= 0:
+                raise ValueError(f"Training config {training_name} has invalid learning rate: {lr}")
+            
+            # Validate batch size
+            batch_size = training_config['batch_size']
+            if not isinstance(batch_size, int) or batch_size <= 0:
+                raise ValueError(f"Training config {training_name} has invalid batch size: {batch_size}")
+            
+            # Validate MCTS simulations
+            sims = training_config['mcts_simulations']
+            if not isinstance(sims, int) or sims <= 0:
+                raise ValueError(f"Training config {training_name} has invalid MCTS simulations: {sims}")
+        
+        self.logger.info("Configuration validation completed successfully")
+    
+    def _create_default_combinations(self, configs: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Create default model+training combinations for parallel training.
+        
+        Default setup: 3 small + standard, 3 micro + prototype
+        
+        Args:
+            configs: Loaded configuration dictionary
+            
+        Returns:
+            List of training job configurations
+        """
+        combinations = []
+        
+        # Check if required model sizes and training configs exist
+        required_models = ['small', 'micro']
+        required_training = ['standard', 'prototype']
+        
+        for model in required_models:
+            if model not in configs['model_sizes']:
+                raise ValueError(f"Required model size '{model}' not found in configuration")
+        
+        for training in required_training:
+            if training not in configs['training_configs']:
+                raise ValueError(f"Required training config '{training}' not found in configuration")
+        
+        # Create 3 small models with standard training
+        styles = ['tactical', 'positional', 'dynamic']
+        for i, style in enumerate(styles):
+            combinations.append({
+                'job_id': f'small_{style}_{i+1}',
+                'model_size': 'small',
+                'training_config': 'standard',
+                'style': style,
+                'description': f'Small model with {style} style using standard training'
+            })
+        
+        # Create 3 micro models with prototype training  
+        for i, style in enumerate(styles):
+            combinations.append({
+                'job_id': f'micro_{style}_{i+1}',
+                'model_size': 'micro', 
+                'training_config': 'prototype',
+                'style': style,
+                'description': f'Micro model with {style} style using prototype training'
+            })
+        
+        self.logger.info(f"Created {len(combinations)} default training combinations")
+        return combinations
+    
+    def _create_default_training_jobs(self) -> List[Dict[str, Any]]:
+        """
+        Create training job specifications from default combinations.
+        
+        Returns:
+            List of detailed training job specifications
+        """
+        training_jobs = []
+        
+        for combo in self.configs['default_combinations']:
+            # Get model and training configurations
+            model_config = self.configs['model_sizes'][combo['model_size']]
+            training_config = self.configs['training_configs'][combo['training_config']]
+            
+            # Create detailed job specification
+            job = {
+                'job_id': combo['job_id'],
+                'model_size': combo['model_size'],
+                'training_config': combo['training_config'],
+                'style': combo['style'],
+                'description': combo['description'],
+                
+                # Model architecture
+                'filters': model_config['filters'],
+                'blocks': model_config['blocks'],
+                
+                # Training parameters
+                'initial_learning_rate': training_config['initial_learning_rate'],
+                'batch_size': training_config['batch_size'],
+                'mcts_simulations': training_config['mcts_simulations'],
+                'games_per_iteration': training_config['games_per_iteration'],
+                'dirichlet_alpha': training_config['dirichlet_alpha'],
+                'temperature_moves': training_config['temperature_moves'],
+                
+                # Learning rate scheduler
+                'lr_scheduler_type': training_config['lr_scheduler'],
+                'lr_factor': training_config['lr_factor'],
+                'lr_patience': training_config['lr_patience'],
+                
+                # Status tracking
+                'status': 'initialized',
+                'epoch': 0,
+                'games_played': 0,
+                'current_loss': None,
+                'best_loss': float('inf'),
+                'last_checkpoint': None
+            }
+            
+            training_jobs.append(job)
+        
+        return training_jobs
+    
+    def _setup_logging(self) -> logging.Logger:
+        """
+        Setup logging for the parallel trainer.
+        
+        Returns:
+            Configured logger instance
+        """
+        logger = logging.getLogger(f"ParallelTrainer_{id(self)}")
+        logger.setLevel(logging.INFO)
+        
+        # Create formatter
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        
+        # Console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+        
+        # File handler
+        log_dir = Path("logs")
+        log_dir.mkdir(exist_ok=True)
+        
+        log_file = log_dir / f"parallel_trainer_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        
+        logger.info(f"Logging initialized - log file: {log_file}")
+        return logger
+    
+    def start_parallel_training(self, max_iterations: int = 1000, save_frequency: int = 50) -> None:
+        """
+        Start TRUE parallel training - each model trains in its own process simultaneously.
+        
+        Creates separate processes for each training job, with proper GPU memory allocation
+        and inter-process communication for monitoring and coordination.
+        
+        Args:
+            max_iterations: Maximum number of training iterations per model
+            save_frequency: Save checkpoints every N iterations
+            
+        Process Architecture:
+        - Main process: Coordination, monitoring, checkpointing
+        - 6 worker processes: Independent model training with GPU memory isolation
+        - Shared queues: Inter-process communication for progress tracking
+        """
+        self.logger.info(f"Starting TRUE parallel training for {len(self.default_training_jobs)} models")
+        self.logger.info(f"Max iterations: {max_iterations}, Save frequency: {save_frequency}")
+        
+        # Set multiprocessing start method
+        if mp.get_start_method(allow_none=True) != 'spawn':
+            mp.set_start_method('spawn', force=True)
+        
+        # Create inter-process communication queues
+        self.progress_queue = mp.Queue()
+        self.checkpoint_queue = mp.Queue() 
+        self.error_queue = mp.Queue()
+        
+        # Calculate GPU memory allocation per process
+        self._calculate_gpu_memory_allocation()
+        
+        # Create shared directory for inter-process coordination
+        self.coordination_dir = Path("coordination")
+        self.coordination_dir.mkdir(exist_ok=True)
+        
+        # Start all training processes
+        self.processes = []
+        self.process_status = {}
+        
+        try:
+            self.logger.info("Starting parallel training processes...")
+            
+            for i, job in enumerate(self.default_training_jobs):
+                job_id = job['job_id']
+                
+                # Calculate GPU memory offset for this process
+                memory_offset = i * self.memory_per_process
+                
+                # Create process for this training job
+                process = mp.Process(
+                    target=self._training_worker,
+                    args=(
+                        job,
+                        max_iterations,
+                        save_frequency,
+                        memory_offset,
+                        self.progress_queue,
+                        self.checkpoint_queue,
+                        self.error_queue
+                    ),
+                    name=f"TrainingWorker-{job_id}"
+                )
+                
+                process.start()
+                self.processes.append(process)
+                self.process_status[job_id] = {
+                    'process': process,
+                    'status': 'starting',
+                    'iteration': 0,
+                    'loss': None,
+                    'start_time': datetime.now()
+                }
+                
+                self.logger.info(f"Started process for {job_id} (PID: {process.pid})")
+                
+                # Small delay to stagger GPU memory allocation
+                time.sleep(2)
+            
+            self.logger.info(f"All {len(self.processes)} training processes started successfully")
+            
+            # Main coordination loop
+            self._coordinate_parallel_training(max_iterations, save_frequency)
+            
+        except KeyboardInterrupt:
+            self.logger.info("Training interrupted by user - stopping all processes...")
+            self._stop_all_processes()
+            
+        except Exception as e:
+            self.logger.error(f"Parallel training failed: {e}")
+            self._stop_all_processes()
+            raise
+            
+        finally:
+            self._cleanup_parallel_training()
+    
+    def _calculate_gpu_memory_allocation(self) -> None:
+        """
+        Calculate GPU memory allocation per training process.
+        
+        Divides available GPU memory among training processes with safety margin.
+        """
+        if not torch.cuda.is_available():
+            self.logger.warning("CUDA not available - training will use CPU")
+            self.memory_per_process = 0
+            return
+        
+        # Get total GPU memory
+        total_memory = torch.cuda.get_device_properties(0).total_memory
+        total_memory_gb = total_memory / (1024**3)
+        
+        # Reserve memory for system and coordination (4GB safety margin)
+        available_memory = total_memory - (4 * 1024**3)
+        
+        # Calculate memory per process
+        num_processes = len(self.default_training_jobs)
+        self.memory_per_process = available_memory // num_processes
+        memory_per_process_gb = self.memory_per_process / (1024**3)
+        
+        self.logger.info(f"GPU Memory allocation:")
+        self.logger.info(f"  Total GPU memory: {total_memory_gb:.2f}GB")
+        self.logger.info(f"  Available for training: {available_memory / (1024**3):.2f}GB")
+        self.logger.info(f"  Memory per process: {memory_per_process_gb:.2f}GB")
+        self.logger.info(f"  Number of processes: {num_processes}")
+        
+        if memory_per_process_gb < 1.0:
+            self.logger.warning(f"Low memory per process ({memory_per_process_gb:.2f}GB) - consider reducing model sizes")
+    
+    def _training_worker(self, job: Dict[str, Any], max_iterations: int, save_frequency: int,
+                        memory_offset: int, progress_queue: mp.Queue, 
+                        checkpoint_queue: mp.Queue, error_queue: mp.Queue) -> None:
+        """
+        Worker process for training a single model.
+        
+        Runs in separate process with isolated GPU memory, independent training loop,
+        and dedicated TensorBoard logging.
+        
+        Args:
+            job: Training job configuration
+            max_iterations: Maximum training iterations
+            save_frequency: Checkpoint save frequency
+            memory_offset: GPU memory offset for this process
+            progress_queue: Queue for progress updates
+            checkpoint_queue: Queue for checkpoint notifications
+            error_queue: Queue for error reporting
+        """
+        job_id = job['job_id']
+        
+        try:
+            # Set up process-specific logging
+            worker_logger = self._setup_worker_logging(job_id)
+            worker_logger.info(f"Training worker started for {job_id}")
+            
+            # Set up TensorBoard logging for this worker
+            tensorboard_writer = None
+            if TENSORBOARD_AVAILABLE:
+                tensorboard_log_dir = self.tensorboard_dir / job_id
+                tensorboard_writer = SummaryWriter(log_dir=str(tensorboard_log_dir))
+                worker_logger.info(f"TensorBoard logging to: {tensorboard_log_dir}")
+                
+                # Log job configuration to TensorBoard
+                config_text = f"""
+                **Model Configuration:**
+                - Model Size: {job['model_size']}
+                - Style: {job['style']}
+                - Filters: {job['filters']}
+                - Blocks: {job['blocks']}
+                
+                **Training Configuration:**
+                - Initial LR: {job['initial_learning_rate']}
+                - Batch Size: {job['batch_size']}
+                - MCTS Simulations: {job['mcts_simulations']}
+                - Games per Iteration: {job['games_per_iteration']}
+                - Dirichlet Alpha: {job['dirichlet_alpha']}
+                - Temperature Moves: {job['temperature_moves']}
+                """
+                tensorboard_writer.add_text("Configuration", config_text, 0)
+            
+            # Set GPU memory allocation for this process
+            if torch.cuda.is_available():
+                torch.cuda.set_per_process_memory_fraction(
+                    self.memory_per_process / torch.cuda.get_device_properties(0).total_memory
+                )
+                torch.cuda.empty_cache()
+            
+            # Initialize model and training components for this worker
+            model, optimizer, scheduler = self._initialize_worker_components(job)
+            
+            # Import self-play functionality
+            from .self_play import StyleSpecificSelfPlay
+            self_play_coordinator = StyleSpecificSelfPlay(device=self.device)
+            
+            worker_logger.info(f"Worker {job_id} initialized - starting training loop")
+            
+            # Track metrics for TensorBoard
+            total_games_played = 0
+            best_loss = float('inf')
+            games_per_second_history = []
+            
+            # Independent training loop for this model
+            for iteration in range(max_iterations):
+                iteration_start = time.time()
+                
+                try:
+                    # Generate self-play training data
+                    games_start = time.time()
+                    training_examples = self_play_coordinator.generate_training_examples(
+                        model=model,
+                        style=job['style'],
+                        num_games=job['games_per_iteration'],
+                        mcts_simulations=job['mcts_simulations'],
+                        dirichlet_alpha=job['dirichlet_alpha'],
+                        temperature_moves=job['temperature_moves']
+                    )
+                    games_time = time.time() - games_start
+                    games_per_second = job['games_per_iteration'] / games_time if games_time > 0 else 0
+                    games_per_second_history.append(games_per_second)
+                    
+                    # Train model on generated data
+                    training_start = time.time()
+                    loss_dict = self._worker_train_model_detailed(model, optimizer, training_examples, job)
+                    training_time = time.time() - training_start
+                    
+                    total_loss = loss_dict['total_loss']
+                    policy_loss = loss_dict['policy_loss']
+                    value_loss = loss_dict['value_loss']
+                    
+                    # Update learning rate scheduler
+                    old_lr = optimizer.param_groups[0]['lr']
+                    scheduler.step(total_loss)
+                    new_lr = optimizer.param_groups[0]['lr']
+                    
+                    # Track best loss
+                    if total_loss < best_loss:
+                        best_loss = total_loss
+                    
+                    iteration_time = time.time() - iteration_start
+                    total_games_played += job['games_per_iteration']
+                    
+                    # TensorBoard logging
+                    if tensorboard_writer is not None:
+                        global_step = iteration + 1
+                        
+                        # Loss metrics
+                        tensorboard_writer.add_scalar('Loss/Total', total_loss, global_step)
+                        tensorboard_writer.add_scalar('Loss/Policy', policy_loss, global_step)
+                        tensorboard_writer.add_scalar('Loss/Value', value_loss, global_step)
+                        tensorboard_writer.add_scalar('Loss/Best', best_loss, global_step)
+                        
+                        # Learning rate
+                        tensorboard_writer.add_scalar('Training/Learning_Rate', new_lr, global_step)
+                        
+                        # Training speed metrics
+                        tensorboard_writer.add_scalar('Performance/Games_Per_Second', games_per_second, global_step)
+                        tensorboard_writer.add_scalar('Performance/Iteration_Time_Seconds', iteration_time, global_step)
+                        tensorboard_writer.add_scalar('Performance/Training_Time_Seconds', training_time, global_step)
+                        tensorboard_writer.add_scalar('Performance/SelfPlay_Time_Seconds', games_time, global_step)
+                        tensorboard_writer.add_scalar('Performance/Total_Games_Played', total_games_played, global_step)
+                        
+                        # Model architecture info (logged once)
+                        if iteration == 0:
+                            total_params = sum(p.numel() for p in model.parameters())
+                            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+                            tensorboard_writer.add_scalar('Model/Total_Parameters', total_params, 0)
+                            tensorboard_writer.add_scalar('Model/Trainable_Parameters', trainable_params, 0)
+                        
+                        # GPU memory usage (if available)
+                        if torch.cuda.is_available():
+                            gpu_memory_allocated = torch.cuda.memory_allocated() / (1024**3)  # GB
+                            gpu_memory_reserved = torch.cuda.memory_reserved() / (1024**3)    # GB
+                            tensorboard_writer.add_scalar('System/GPU_Memory_Allocated_GB', gpu_memory_allocated, global_step)
+                            tensorboard_writer.add_scalar('System/GPU_Memory_Reserved_GB', gpu_memory_reserved, global_step)
+                        
+                        # Training examples statistics
+                        tensorboard_writer.add_scalar('Data/Training_Examples_Count', len(training_examples), global_step)
+                        
+                        # Moving averages
+                        if len(games_per_second_history) >= 10:
+                            avg_games_per_second = sum(games_per_second_history[-10:]) / 10
+                            tensorboard_writer.add_scalar('Performance/Games_Per_Second_10MA', avg_games_per_second, global_step)
+                        
+                        # LR change detection
+                        if old_lr != new_lr:
+                            tensorboard_writer.add_scalar('Training/LR_Reduction_Event', 1.0, global_step)
+                            worker_logger.info(f"Learning rate reduced: {old_lr:.8f} → {new_lr:.8f}")
+                    
+                    # Send progress update to main process
+                    progress_update = {
+                        'job_id': job_id,
+                        'iteration': iteration + 1,
+                        'loss': total_loss,
+                        'policy_loss': policy_loss,
+                        'value_loss': value_loss,
+                        'learning_rate': new_lr,
+                        'iteration_time': iteration_time,
+                        'training_examples': len(training_examples),
+                        'games_per_second': games_per_second,
+                        'total_games_played': total_games_played,
+                        'best_loss': best_loss,
+                        'timestamp': datetime.now().isoformat()
+                    }
+                    
+                    progress_queue.put(progress_update)
+                    
+                    worker_logger.info(
+                        f"Iter {iteration + 1}: Loss={total_loss:.6f} "
+                        f"(Policy={policy_loss:.6f}, Value={value_loss:.6f}), "
+                        f"LR={new_lr:.8f}, Time={iteration_time:.1f}s, "
+                        f"Examples={len(training_examples)}, GPS={games_per_second:.2f}"
+                    )
+                    
+                    # Save checkpoint periodically
+                    if (iteration + 1) % save_frequency == 0:
+                        checkpoint_path = self._worker_save_checkpoint(
+                            job_id, model, optimizer, scheduler, iteration + 1, job
+                        )
+                        
+                        checkpoint_queue.put({
+                            'job_id': job_id,
+                            'iteration': iteration + 1,
+                            'checkpoint_path': str(checkpoint_path),
+                            'timestamp': datetime.now().isoformat()
+                        })
+                        
+                        worker_logger.info(f"Saved checkpoint at iteration {iteration + 1}")
+                        
+                        # Log checkpoint event to TensorBoard
+                        if tensorboard_writer is not None:
+                            tensorboard_writer.add_scalar('Training/Checkpoint_Saved', 1.0, iteration + 1)
+                
+                except Exception as e:
+                    error_msg = f"Error in training iteration {iteration + 1} for {job_id}: {str(e)}"
+                    worker_logger.error(error_msg)
+                    error_queue.put({
+                        'job_id': job_id,
+                        'iteration': iteration + 1,
+                        'error': error_msg,
+                        'timestamp': datetime.now().isoformat()
+                    })
+                    
+                    # Log error to TensorBoard
+                    if tensorboard_writer is not None:
+                        tensorboard_writer.add_scalar('Training/Error_Count', 1.0, iteration + 1)
+                    
+                    # Continue training despite iteration error
+                    continue
+            
+            # Final checkpoint
+            final_checkpoint = self._worker_save_checkpoint(
+                job_id, model, optimizer, scheduler, max_iterations, job
+            )
+            
+            worker_logger.info(f"Training completed for {job_id} - final checkpoint: {final_checkpoint}")
+            
+            # Final TensorBoard logging
+            if tensorboard_writer is not None:
+                tensorboard_writer.add_scalar('Training/Training_Completed', 1.0, max_iterations)
+                
+                # Final summary
+                final_summary = f"""
+                **Training Completed Successfully**
+                
+                - Total Iterations: {max_iterations}
+                - Total Games Played: {total_games_played}
+                - Final Loss: {total_loss:.6f}
+                - Best Loss: {best_loss:.6f}
+                - Final Learning Rate: {new_lr:.8f}
+                - Average Games/Second: {sum(games_per_second_history)/len(games_per_second_history):.2f}
+                """
+                tensorboard_writer.add_text("Training_Summary", final_summary, max_iterations)
+                tensorboard_writer.close()
+            
+            # Send completion notification
+            progress_queue.put({
+                'job_id': job_id,
+                'status': 'completed',
+                'final_checkpoint': str(final_checkpoint),
+                'total_games_played': total_games_played,
+                'best_loss': best_loss,
+                'timestamp': datetime.now().isoformat()
+            })
+            
+        except Exception as e:
+            error_msg = f"Fatal error in worker {job_id}: {str(e)}"
+            error_queue.put({
+                'job_id': job_id,
+                'error': error_msg,
+                'fatal': True,
+                'timestamp': datetime.now().isoformat()
+            })
+            
+            # Close TensorBoard writer on fatal error
+            if 'tensorboard_writer' in locals() and tensorboard_writer is not None:
+                tensorboard_writer.close()
+            
+    def _coordinate_parallel_training(self, max_iterations: int, save_frequency: int) -> None:
+        """
+        Main coordination loop for monitoring parallel training processes.
+        
+        Handles progress monitoring, error handling, and coordination between processes.
+        """
+        self.logger.info("Starting coordination of parallel training processes")
+        
+        completed_processes = set()
+        last_progress_log = time.time()
+        progress_log_interval = 60  # Log overall progress every 60 seconds
+        
+        try:
+            while len(completed_processes) < len(self.processes):
+                # Check for progress updates
+                while True:
+                    try:
+                        progress = self.progress_queue.get(timeout=1.0)
+                        
+                        job_id = progress['job_id']
+                        
+                        if progress.get('status') == 'completed':
+                            completed_processes.add(job_id)
+                            self.process_status[job_id]['status'] = 'completed'
+                            self.logger.info(f"Training completed for {job_id}")
+                        else:
+                            # Update process status
+                            self.process_status[job_id].update({
+                                'status': 'training',
+                                'iteration': progress['iteration'],
+                                'loss': progress['loss'],
+                                'learning_rate': progress['learning_rate'],
+                                'last_update': datetime.now()
+                            })
+                            
+                    except queue.Empty:
+                        break
+                
+                # Check for checkpoint notifications
+                while True:
+                    try:
+                        checkpoint_info = self.checkpoint_queue.get(timeout=0.1)
+                        job_id = checkpoint_info['job_id']
+                        self.logger.info(f"Checkpoint saved for {job_id}: {checkpoint_info['checkpoint_path']}")
+                    except queue.Empty:
+                        break
+                
+                # Check for errors
+                while True:
+                    try:
+                        error_info = self.error_queue.get(timeout=0.1)
+                        job_id = error_info['job_id']
+                        
+                        if error_info.get('fatal'):
+                            self.logger.error(f"FATAL ERROR in {job_id}: {error_info['error']}")
+                            self.process_status[job_id]['status'] = 'failed'
+                            
+                            # Consider restarting the failed process
+                            # For now, just log and continue with other processes
+                        else:
+                            self.logger.warning(f"Error in {job_id}: {error_info['error']}")
+                            
+                    except queue.Empty:
+                        break
+                
+                # Log overall progress periodically
+                current_time = time.time()
+                if current_time - last_progress_log > progress_log_interval:
+                    self._log_overall_progress()
+                    last_progress_log = current_time
+                
+                # Check if all processes are still alive
+                for job_id, status_info in self.process_status.items():
+                    process = status_info['process']
+                    if not process.is_alive() and status_info['status'] not in ['completed', 'failed']:
+                        self.logger.error(f"Process {job_id} died unexpectedly!")
+                        status_info['status'] = 'failed'
+                
+                time.sleep(5)  # Brief pause before next coordination cycle
+                
+        except KeyboardInterrupt:
+            self.logger.info("Coordination interrupted by user")
+            raise
+            
+        self.logger.info("All training processes completed - coordination finished")
+    
+    def _log_overall_progress(self) -> None:
+        """Log overall progress across all training processes."""
+        self.logger.info("=== OVERALL TRAINING PROGRESS ===")
+        
+        total_processes = len(self.process_status)
+        completed = sum(1 for status in self.process_status.values() if status['status'] == 'completed')
+        failed = sum(1 for status in self.process_status.values() if status['status'] == 'failed')
+        training = total_processes - completed - failed
+        
+        self.logger.info(f"Processes: {completed} completed, {training} training, {failed} failed (total: {total_processes})")
+        
+        for job_id, status in self.process_status.items():
+            if status['status'] == 'training':
+                iteration = status.get('iteration', 0)
+                loss = status.get('loss', 'N/A')
+                lr = status.get('learning_rate', 'N/A')
+                
+                if isinstance(loss, float):
+                    loss_str = f"{loss:.6f}"
+                else:
+                    loss_str = str(loss)
+                    
+                if isinstance(lr, float):
+                    lr_str = f"{lr:.8f}"
+                else:
+                    lr_str = str(lr)
+                
+                self.logger.info(f"  {job_id}: Iteration {iteration}, Loss {loss_str}, LR {lr_str}")
+        
+        # GPU memory usage
+        if torch.cuda.is_available():
+            memory_used = torch.cuda.memory_allocated() / (1024**3)
+            memory_cached = torch.cuda.memory_reserved() / (1024**3)
+            self.logger.info(f"GPU Memory: {memory_used:.2f}GB used, {memory_cached:.2f}GB cached")
+    
+    def _stop_all_processes(self) -> None:
+        """Stop all training processes gracefully."""
+        self.logger.info("Stopping all training processes...")
+        
+        for job_id, status_info in self.process_status.items():
+            process = status_info['process']
+            if process.is_alive():
+                self.logger.info(f"Terminating process {job_id} (PID: {process.pid})")
+                process.terminate()
+                
+                # Wait for graceful termination
+                process.join(timeout=10)
+                
+                # Force kill if necessary
+                if process.is_alive():
+                    self.logger.warning(f"Force killing process {job_id}")
+                    process.kill()
+                    process.join()
+        
+        self.logger.info("All processes stopped")
+    
+    def _cleanup_parallel_training(self) -> None:
+        """Clean up resources after parallel training."""
+        self.logger.info("Cleaning up parallel training resources...")
+        
+        # Close queues
+        try:
+            self.progress_queue.close()
+            self.checkpoint_queue.close()
+            self.error_queue.close()
+        except:
+            pass
+        
+        # Clear GPU memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        # Final summary
+        self._training_summary()
+        
+        self.logger.info("Parallel training cleanup completed")
+    
+    def _setup_worker_logging(self, job_id: str) -> logging.Logger:
+        """Setup logging for a worker process."""
+        logger = logging.getLogger(f"Worker-{job_id}")
+        logger.setLevel(logging.INFO)
+        
+        # File handler for this worker
+        log_file = Path("logs") / f"worker_{job_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        log_file.parent.mkdir(exist_ok=True)
+        
+        file_handler = logging.FileHandler(log_file)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        
+        return logger
+    
+    def _initialize_worker_components(self, job: Dict[str, Any]) -> Tuple[AlphaZeroNet, torch.optim.Optimizer, torch.optim.lr_scheduler.ReduceLROnPlateau]:
+        """Initialize model, optimizer, and scheduler for a worker process."""
+        
+        # Create model
+        model = AlphaZeroNet(
+            board_size=8,
+            action_size=4672,
+            num_filters=job['filters'],
+            num_res_blocks=job['blocks'],
+            input_channels=119
+        )
+        model.to(self.device)
+        
+        # Create optimizer
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=job['initial_learning_rate'],
+            weight_decay=1e-4
+        )
+        
+        # Create scheduler
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode='min',
+            factor=job['lr_factor'],
+            patience=job['lr_patience'],
+            threshold=1e-4,
+            min_lr=1e-8
+        )
+        
+        return model, optimizer, scheduler
+    
+    def _worker_train_model(self, model: AlphaZeroNet, optimizer: torch.optim.Optimizer, 
+                           training_examples: List[Any], job: Dict[str, Any]) -> float:
+        """Train model in worker process."""
+        if not training_examples:
+            return 0.0
+            
+        import torch.nn.functional as F
+        
+        model.train()
+        total_loss = 0.0
+        num_batches = 0
+        batch_size = job['batch_size']
+        
+        # Create batches
+        for i in range(0, len(training_examples), batch_size):
+            batch = training_examples[i:i + batch_size]
+            
+            try:
+                # Prepare batch tensors
+                states = torch.stack([ex.state_tensor for ex in batch]).to(self.device)
+                
+                # Policy targets
+                policy_targets = torch.zeros(len(batch), 4672).to(self.device)
+                for j, ex in enumerate(batch):
+                    for action, prob in ex.action_probs.items():
+                        try:
+                            action_idx = self._action_to_index(action)
+                            if 0 <= action_idx < 4672:
+                                policy_targets[j, action_idx] = prob
+                        except:
+                            continue
+                
+                # Value targets
+                value_targets = torch.tensor([ex.outcome for ex in batch], 
+                                           dtype=torch.float32).to(self.device)
+                
+                # Forward pass
+                policy_logits, values = model(states)
+                values = values.squeeze()
+                
+                # Compute losses
+                policy_loss = F.cross_entropy(policy_logits, policy_targets)
+                value_loss = F.mse_loss(values, value_targets)
+                total_loss_batch = policy_loss + value_loss
+                
+                # Backward pass
+                optimizer.zero_grad()
+                total_loss_batch.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                
+                total_loss += total_loss_batch.item()
+                num_batches += 1
+                
+            except Exception as e:
+                continue  # Skip problematic batches
+        
+        return total_loss / num_batches if num_batches > 0 else 0.0
+    
+    def _worker_train_model_detailed(self, model: AlphaZeroNet, optimizer: torch.optim.Optimizer, 
+                                   training_examples: List[Any], job: Dict[str, Any]) -> Dict[str, float]:
+        """Train model in worker process with detailed loss breakdown for TensorBoard."""
+        if not training_examples:
+            return {'total_loss': 0.0, 'policy_loss': 0.0, 'value_loss': 0.0}
+            
+        import torch.nn.functional as F
+        
+        model.train()
+        total_loss = 0.0
+        total_policy_loss = 0.0
+        total_value_loss = 0.0
+        num_batches = 0
+        batch_size = job['batch_size']
+        
+        # Create batches
+        for i in range(0, len(training_examples), batch_size):
+            batch = training_examples[i:i + batch_size]
+            
+            try:
+                # Prepare batch tensors
+                states = torch.stack([ex.state_tensor for ex in batch]).to(self.device)
+                
+                # Policy targets
+                policy_targets = torch.zeros(len(batch), 4672).to(self.device)
+                for j, ex in enumerate(batch):
+                    for action, prob in ex.action_probs.items():
+                        try:
+                            action_idx = self._action_to_index(action)
+                            if 0 <= action_idx < 4672:
+                                policy_targets[j, action_idx] = prob
+                        except:
+                            continue
+                
+                # Value targets
+                value_targets = torch.tensor([ex.outcome for ex in batch], 
+                                           dtype=torch.float32).to(self.device)
+                
+                # Forward pass
+                policy_logits, values = model(states)
+                values = values.squeeze()
+                
+                # Compute losses separately
+                policy_loss = F.cross_entropy(policy_logits, policy_targets)
+                value_loss = F.mse_loss(values, value_targets)
+                total_loss_batch = policy_loss + value_loss
+                
+                # Backward pass
+                optimizer.zero_grad()
+                total_loss_batch.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                
+                # Accumulate losses
+                total_loss += total_loss_batch.item()
+                total_policy_loss += policy_loss.item()
+                total_value_loss += value_loss.item()
+                num_batches += 1
+                
+            except Exception as e:
+                continue  # Skip problematic batches
+        
+        if num_batches > 0:
+            return {
+                'total_loss': total_loss / num_batches,
+                'policy_loss': total_policy_loss / num_batches,
+                'value_loss': total_value_loss / num_batches
+            }
+        else:
+            return {'total_loss': 0.0, 'policy_loss': 0.0, 'value_loss': 0.0}
+    
+    def _worker_save_checkpoint(self, job_id: str, model: AlphaZeroNet, 
+                               optimizer: torch.optim.Optimizer, 
+                               scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau,
+                               iteration: int, job: Dict[str, Any]) -> Path:
+        """Save checkpoint in worker process."""
+        checkpoint_dir = self.checkpoint_dir / job_id
+        checkpoint_dir.mkdir(exist_ok=True)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        checkpoint_path = checkpoint_dir / f"{job_id}_iter_{iteration}_{timestamp}.pth"
+        
+        torch.save({
+            'iteration': iteration,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'job_config': job,
+            'timestamp': timestamp
+        }, checkpoint_path)
+        
+        return checkpoint_path
+    
+    def _initialize_training_components(self) -> None:
+        """
+        Initialize all models, optimizers, and schedulers for parallel training.
+        """
+        self.logger.info("Initializing training components for all models...")
+        
+        # Import model creation function
+        from ..core.alphazero_net import AlphaZeroNet
+        
+        for job in self.default_training_jobs:
+            job_id = job['job_id']
+            
+            self.logger.info(f"Initializing {job_id}: {job['filters']} filters, {job['blocks']} blocks")
+            
+            # Create model with job-specific architecture
+            model = AlphaZeroNet(
+                board_size=8,
+                action_size=4672,
+                num_filters=job['filters'],
+                num_res_blocks=job['blocks'],
+                input_channels=119
+            )
+            model.to(self.device)
+            self.models[job_id] = model
+            
+            # Create optimizer
+            optimizer = torch.optim.Adam(
+                model.parameters(),
+                lr=job['initial_learning_rate'],
+                weight_decay=1e-4  # L2 regularization as in AlphaZero
+            )
+            self.optimizers[job_id] = optimizer
+            
+            # Create learning rate scheduler
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                mode='min',
+                factor=job['lr_factor'],
+                patience=job['lr_patience'],
+                threshold=1e-4,
+                min_lr=1e-8
+            )
+            self.schedulers[job_id] = scheduler
+            
+            # Initialize training state
+            self.training_states[job_id] = {
+                'iteration': 0,
+                'total_games': 0,
+                'best_loss': float('inf'),
+                'losses': [],
+                'learning_rates': []
+            }
+            
+            self.logger.info(f"Initialized {job_id} successfully")
+        
+        # Log total model count and estimated memory usage
+        total_params = sum(sum(p.numel() for p in model.parameters()) for model in self.models.values())
+        self.logger.info(f"Initialized {len(self.models)} models with {total_params:,} total parameters")
+        
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()  # Clear any cached memory
+            initial_memory = torch.cuda.memory_allocated() / 1024**3
+            self.logger.info(f"Initial GPU memory usage: {initial_memory:.2f}GB")
+    
+    def _train_model_on_examples(self, job_id: str, training_examples: List[Any]) -> float:
+        """
+        Train a specific model on its training examples.
+        
+        Args:
+            job_id: Identifier for the training job
+            training_examples: List of training examples from self-play
+            
+        Returns:
+            Average training loss for this batch
+        """
+        if not training_examples:
+            return 0.0
+        
+        model = self.models[job_id]
+        optimizer = self.optimizers[job_id]
+        job = next(job for job in self.default_training_jobs if job['job_id'] == job_id)
+        batch_size = job['batch_size']
+        
+        model.train()
+        total_loss = 0.0
+        num_batches = 0
+        
+        # Create batches from training examples
+        for i in range(0, len(training_examples), batch_size):
+            batch = training_examples[i:i + batch_size]
+            
+            # Prepare batch tensors (this will depend on your training example format)
+            # For now, assuming training examples have state_tensor, action_probs, outcome
+            try:
+                states = torch.stack([ex.state_tensor for ex in batch]).to(self.device)
+                
+                # Convert action probabilities to policy targets
+                policy_targets = torch.zeros(len(batch), 4672).to(self.device)
+                for j, ex in enumerate(batch):
+                    for action, prob in ex.action_probs.items():
+                        try:
+                            action_idx = self._action_to_index(action)
+                            if 0 <= action_idx < 4672:
+                                policy_targets[j, action_idx] = prob
+                        except:
+                            continue  # Skip invalid actions
+                
+                # Value targets
+                value_targets = torch.tensor([ex.outcome for ex in batch], 
+                                           dtype=torch.float32).to(self.device)
+                
+                # Forward pass
+                policy_logits, values = model(states)
+                values = values.squeeze()
+                
+                # Compute losses
+                policy_loss = F.cross_entropy(policy_logits, policy_targets)
+                value_loss = F.mse_loss(values, value_targets)
+                total_loss_batch = policy_loss + value_loss
+                
+                # Backward pass
+                optimizer.zero_grad()
+                total_loss_batch.backward()
+                
+                # Gradient clipping (as in AlphaZero)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                
+                optimizer.step()
+                
+                total_loss += total_loss_batch.item()
+                num_batches += 1
+                
+            except Exception as e:
+                self.logger.warning(f"Error processing batch for {job_id}: {e}")
+                continue
+        
+        avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
+        
+        # Update training state
+        self.training_states[job_id]['losses'].append(avg_loss)
+        self.training_states[job_id]['learning_rates'].append(
+            optimizer.param_groups[0]['lr']
+        )
+        
+        return avg_loss
+    
+    def _action_to_index(self, action) -> int:
+        """
+        Convert chess move to action index using ChessPosition implementation.
+        """
+        from src.core.game_utils import ChessPosition
+        temp_position = ChessPosition()
+        return temp_position.action_to_index(action)
+    
+    def _save_checkpoints(self, iteration: int, emergency: bool = False) -> None:
+        """
+        Save model checkpoints and training state.
+        
+        Args:
+            iteration: Current training iteration
+            emergency: Whether this is an emergency save
+        """
+        save_type = "emergency" if emergency else "regular"
+        self.logger.info(f"Saving {save_type} checkpoints at iteration {iteration}")
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        for job in self.default_training_jobs:
+            job_id = job['job_id']
+            
+            # Create checkpoint directory
+            checkpoint_path = self.checkpoint_dir / job_id
+            checkpoint_path.mkdir(exist_ok=True)
+            
+            # Save model state
+            model_file = checkpoint_path / f"{job_id}_iter_{iteration}_{timestamp}.pth"
+            torch.save({
+                'iteration': iteration,
+                'model_state_dict': self.models[job_id].state_dict(),
+                'optimizer_state_dict': self.optimizers[job_id].state_dict(),
+                'scheduler_state_dict': self.schedulers[job_id].state_dict(),
+                'job_config': job,
+                'training_state': self.training_states[job_id],
+                'timestamp': timestamp
+            }, model_file)
+            
+            job['last_checkpoint'] = str(model_file)
+            self.logger.info(f"Saved checkpoint for {job_id}: {model_file}")
+        
+        # Save overall training state
+        training_summary = {
+            'iteration': iteration,
+            'timestamp': timestamp,
+            'training_jobs': self.default_training_jobs,
+            'configs': self.configs,
+            'training_states': self.training_states
+        }
+        
+        summary_file = self.checkpoint_dir / f"training_summary_{iteration}_{timestamp}.json"
+        with open(summary_file, 'w') as f:
+            json.dump(training_summary, f, indent=2, default=str)
+        
+        self.logger.info(f"Saved training summary: {summary_file}")
+    
+    def _training_summary(self) -> None:
+        """
+        Print final training summary and statistics.
+        """
+        self.logger.info("=== FINAL TRAINING SUMMARY ===")
+        
+        for job in self.default_training_jobs:
+            job_id = job['job_id']
+            
+            self.logger.info(f"\n{job_id} ({job['style']} style, {job['model_size']} model):")
+            self.logger.info(f"  Total epochs: {job['epoch']}")
+            self.logger.info(f"  Games played: {job['games_played']}")
+            self.logger.info(f"  Final loss: {job['current_loss']:.6f}")
+            self.logger.info(f"  Best loss: {job['best_loss']:.6f}")
+            self.logger.info(f"  Final LR: {self.optimizers[job_id].param_groups[0]['lr']:.8f}")
+            
+            if job['last_checkpoint']:
+                self.logger.info(f"  Last checkpoint: {job['last_checkpoint']}")
+        
+        # GPU memory summary
+        if torch.cuda.is_available():
+            final_memory = torch.cuda.memory_allocated() / 1024**3
+            max_memory = torch.cuda.max_memory_allocated() / 1024**3
+            self.logger.info(f"\nGPU Memory - Final: {final_memory:.2f}GB, Peak: {max_memory:.2f}GB")
+        
+        self.logger.info("Training session completed.")

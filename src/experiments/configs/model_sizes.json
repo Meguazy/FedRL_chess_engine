@@ -1,0 +1,37 @@
+{
+  "nano": {
+    "filters": 32,
+    "blocks": 4,
+    "description": "Smallest model for proof of concept - ultra lightweight"
+  },
+  "micro": {
+    "filters": 64,
+    "blocks": 6, 
+    "description": "Small but capable model for resource-constrained training"
+  },
+  "small": {
+    "filters": 96,
+    "blocks": 8,
+    "description": "Balanced model with good performance-to-size ratio"
+  },
+  "medium": {
+    "filters": 128,
+    "blocks": 10,
+    "description": "Standard size model with solid capabilities"
+  },
+  "large": {
+    "filters": 160,
+    "blocks": 12,
+    "description": "Large model for higher performance when resources allow"
+  },
+  "xl": {
+    "filters": 192,
+    "blocks": 15,
+    "description": "Extra large model for maximum performance"
+  },
+  "standard" : {
+    "filters": 256,
+    "blocks": 19,
+    "description": "Standard model for balanced performance"
+  }
+}
