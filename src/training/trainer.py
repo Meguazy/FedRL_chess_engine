@@ -637,7 +637,9 @@ class ParallelTrainer:
                         num_games=job['games_per_iteration'],
                         mcts_simulations=job['mcts_simulations'],
                         dirichlet_alpha=job['dirichlet_alpha'],
-                        temperature_moves=job['temperature_moves']
+                        temperature_moves=job['temperature_moves'],
+                        save_board_images=job.get('save_board_images', False),
+                        board_images_dir=job.get('board_images_dir', 'board_images')
                     )
                     games_time = time.time() - games_start
                     games_per_second = job['games_per_iteration'] / games_time if games_time > 0 else 0

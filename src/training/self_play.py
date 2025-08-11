@@ -10,17 +10,96 @@ Author: Francesco Finucci
 import torch
 import torch.nn.functional as F
 import chess
+import chess.svg
 import numpy as np
 import logging
 import time
+import os
+import json
+from pathlib import Path
 from typing import List, Dict, Optional, Any, Tuple
 from dataclasses import dataclass
 import random
 
-from ..core.alphazero_mcts import AlphaZeroMCTS, AlphaZeroTrainingExample
+# For board image generation
+try:
+    import cairosvg
+    CAIROSVG_AVAILABLE = True
+except ImportError:
+    CAIROSVG_AVAILABLE = False
+    print("⚠️  cairosvg not available - board images will be saved as SVG only")
+
+try:
+    from PIL import Image
+    import io
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    print("⚠️  PIL not available - board images will be saved as SVG only")
+
+from ..core.chess_engine import ChessPosition
+from ..core.game_utils import ChessGameState
 from ..core.alphazero_net import AlphaZeroNet
-from ..core.game_utils import ChessPosition
+from ..core.alphazero_mcts import AlphaZeroMCTS, AlphaZeroTrainingExample, generate_self_play_game, tactical_temperature_schedule
 from ..data.openings.openings import ECO_OpeningDatabase, OpeningTemplate
+
+
+def save_board_image(board: chess.Board, filepath: str, title: str = "") -> bool:
+    """
+    Save a chess board position as an image.
+    
+    Args:
+        board: Chess board position to save
+        filepath: Path where to save the image (without extension)
+        title: Optional title to add to the image
+        
+    Returns:
+        True if saved successfully, False otherwise
+    """
+    try:
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        
+        # Generate SVG of the board
+        board_svg = chess.svg.board(
+            board=board,
+            size=400,
+            coordinates=True,
+            lastmove=board.peek() if board.move_stack else None
+        )
+        
+        # Save as SVG first (always works)
+        svg_path = f"{filepath}.svg"
+        with open(svg_path, 'w') as f:
+            f.write(board_svg)
+        
+        # Try to convert to PNG if libraries are available
+        png_path = f"{filepath}.png"
+        
+        if CAIROSVG_AVAILABLE:
+            # Method 1: Use cairosvg directly
+            try:
+                cairosvg.svg2png(bytestring=board_svg.encode('utf-8'), 
+                               write_to=png_path)
+                return True
+            except Exception as e:
+                print(f"⚠️  cairosvg conversion failed: {e}")
+        
+        if PIL_AVAILABLE:
+            # Method 2: Use PIL with SVG (requires additional setup)
+            try:
+                # This requires rsvg or similar - might not work without additional setup
+                pass
+            except Exception:
+                pass
+        
+        # If PNG conversion failed, at least we have SVG
+        print(f"📷 Board saved as SVG: {svg_path}")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Failed to save board image: {e}")
+        return False
 
 
 @dataclass
@@ -42,18 +121,29 @@ class StyleSpecificSelfPlay:
     This creates training data biased toward tactical, positional, or dynamic styles.
     """
     
-    def __init__(self, device: str = 'cuda', logger: logging.Logger = None):
+    def __init__(self, device: str = 'cuda', logger: logging.Logger = None, 
+                 save_board_images: bool = False, board_images_dir: str = "board_images"):
         """
         Initialize style-specific self-play generator.
         
         Args:
             device: PyTorch device for neural network inference
             logger: Logger instance to use (if None, creates its own)
+            save_board_images: Whether to save starting and ending board positions as images
+            board_images_dir: Directory to save board images
         """
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         
         # Initialize ECO opening database
         self.opening_db = ECO_OpeningDatabase()
+        
+        # Board image saving configuration
+        self.save_board_images = save_board_images
+        self.board_images_dir = board_images_dir
+        
+        if self.save_board_images:
+            os.makedirs(self.board_images_dir, exist_ok=True)
+            self.logger.info(f"Board images will be saved to: {self.board_images_dir}")
         
         # Setup logging - use provided logger or create own
         if logger is not None:
@@ -77,7 +167,8 @@ class StyleSpecificSelfPlay:
     
     def generate_training_examples(self, model: AlphaZeroNet, style: str, num_games: int,
                                  mcts_simulations: int = 800, dirichlet_alpha: float = 0.3,
-                                 temperature_moves: int = 30) -> List[AlphaZeroTrainingExample]:
+                                 temperature_moves: int = 30, save_board_images: bool = False,
+                                 board_images_dir: str = "board_images") -> List[AlphaZeroTrainingExample]:
         """
         Generate training examples through style-specific self-play.
         
@@ -88,6 +179,8 @@ class StyleSpecificSelfPlay:
             mcts_simulations: Number of MCTS simulations per move
             dirichlet_alpha: Dirichlet noise parameter for exploration
             temperature_moves: Number of moves to use temperature > 0
+            save_board_images: Whether to save starting and ending board positions as images
+            board_images_dir: Directory to save board images
             
         Returns:
             List of training examples from all generated games
@@ -99,7 +192,7 @@ class StyleSpecificSelfPlay:
         
         # Create MCTS engine for this model
         self.logger.info(f"Creating MCTS engine for {style} style games...")
-        mcts_engine = AlphaZeroMCTS(model, c_puct=1.0, device=self.device)
+        mcts_engine = AlphaZeroMCTS(model, c_puct=1.0, device=self.device, logger=self.logger)
         self.logger.info(f"MCTS engine created successfully")
         
         all_training_examples = []
@@ -115,7 +208,9 @@ class StyleSpecificSelfPlay:
                     mcts_simulations=mcts_simulations,
                     dirichlet_alpha=dirichlet_alpha,
                     temperature_moves=temperature_moves,
-                    game_id=f"{style}_{game_idx}"
+                    game_id=f"{style}_{game_idx}",
+                    save_board_images=save_board_images,
+                    board_images_dir=board_images_dir
                 )
                 
                 if game_result and game_result.training_examples:
@@ -148,15 +243,17 @@ class StyleSpecificSelfPlay:
     
     def _generate_single_game(self, mcts_engine: AlphaZeroMCTS, style: str,
                              mcts_simulations: int, dirichlet_alpha: float,
-                             temperature_moves: int, game_id: str) -> Optional[SelfPlayGameResult]:
+                             temperature_moves: int, game_id: str,
+                             save_board_images: bool = False,
+                             board_images_dir: str = "board_images") -> Optional[SelfPlayGameResult]:
         """
-        Generate a single self-play game with style-specific opening.
+        Generate a single self-play game using the enhanced MCTS implementation.
         
         Args:
             mcts_engine: MCTS engine for move selection
             style: Target playing style
             mcts_simulations: MCTS simulations per move
-            dirichlet_alpha: Dirichlet noise parameter
+            dirichlet_alpha: Dirichlet noise parameter (not used in new implementation)
             temperature_moves: Moves with temperature > 0
             game_id: Unique identifier for this game
             
@@ -169,148 +266,155 @@ class StyleSpecificSelfPlay:
         # Create initial position from opening
         initial_position = self._create_position_from_opening(opening)
         
-        # Generate training examples through self-play
-        training_examples = []
-        current_position = initial_position.clone()
-        move_count = 0
-        max_moves = 80  # Prevent infinite games - increased from 200 to allow more natural endings
-        
-        # Resignation parameters
-        resign_threshold = 0.15  # Resign if win probability < 15% (less aggressive)
-        resign_earliest_move = 20  # Don't resign before move 20
-        consecutive_bad_evals = 0  # Track consecutive bad evaluations
-        resign_consistency_required = 5  # Need 5 consecutive bad evals to resign (more conservative)
-        
-        # Track game state for style adherence calculation
-        opening_moves_played = len(opening.moves) if opening else 0
-        
-        while not current_position.is_terminal() and move_count < max_moves:
-            # Calculate temperature based on move number
-            if move_count < temperature_moves:
-                temperature = 1.0
-            else:
-                temperature = 0.0  # Deterministic play after temperature_moves
-            
-            # Get move probabilities from MCTS
-            try:
-                move_start_time = time.time()
-                action_probs = mcts_engine.get_action_probabilities(
-                    current_position,
-                    num_simulations=mcts_simulations,
-                    temperature=temperature
-                )
-                move_time = time.time() - move_start_time
-                
-                # Log timing every 10 moves to avoid spam
-                if move_count % 10 == 0:
-                    self.logger.info(f"Move {move_count}: {move_time:.2f}s ({mcts_simulations} sims)")
-                
-                if not action_probs:
-                    break  # No legal moves
-                
-                # Add Dirichlet noise to root node for exploration
-                if move_count < temperature_moves:
-                    action_probs = self._add_dirichlet_noise(action_probs, dirichlet_alpha)
-                
-                # Check for resignation (if enabled and past earliest move)
-                if move_count >= resign_earliest_move:
-                    # Get current position evaluation from MCTS value
-                    # We can estimate this from the neural network or use a simple heuristic
-                    root_node = mcts_engine.search(current_position, mcts_simulations)
-                    position_value = root_node.value_sum / max(root_node.visit_count, 1)
-                    
-                    # Convert neural network value to win probability (roughly)
-                    # Neural network outputs are in [-1, 1], convert to [0, 1]
-                    win_probability = (position_value + 1.0) / 2.0
-                    
-                    # Check if position is resignable
-                    if win_probability < resign_threshold or win_probability > (1.0 - resign_threshold):
-                        consecutive_bad_evals += 1
-                        if consecutive_bad_evals >= resign_consistency_required:
-                            # Resign the game
-                            final_reward = -1.0 if win_probability < resign_threshold else 1.0
-                            # Adjust for current player perspective
-                            if current_position.get_current_player() == -1:  # Black to move
-                                final_reward = -final_reward
-                            
-                            termination_reason = f"resignation(eval={win_probability:.3f},threshold={resign_threshold})"
-                            self.logger.info(f"Game {game_id} resigned after {move_count} moves: {termination_reason}")
-                            
-                            # Update training examples with resignation outcome
-                            for i, example in enumerate(training_examples):
-                                if example.current_player == current_position.get_current_player():
-                                    example.outcome = final_reward
-                                else:
-                                    example.outcome = -final_reward
-                            
-                            return SelfPlayGameResult(
-                                training_examples=training_examples,
-                                game_length=move_count,
-                                final_result=final_reward,
-                                opening_used=opening.name if opening else None,
-                                style_adherence=min(opening_moves_played / max(move_count, 1), 1.0) if opening else 0.0
-                            )
-                    else:
-                        consecutive_bad_evals = 0  # Reset counter
-                
-                # Create training example
-                training_example = AlphaZeroTrainingExample(
-                    state_tensor=current_position.to_tensor().clone(),
-                    action_probs=action_probs.copy(),
-                    outcome=0.0,  # Will be updated with final game result
-                    current_player=current_position.get_current_player()
-                )
-                training_examples.append(training_example)
-                
-                # Sample action from probabilities
-                if temperature == 0.0:
-                    # Deterministic: choose best action
-                    action = max(action_probs.keys(), key=lambda a: action_probs[a])
+        # Define temperature schedule based on style and parameters
+        def style_temperature_schedule(move_num: int) -> float:
+            """Temperature schedule adapted to style and configuration."""
+            if move_num < temperature_moves:
+                if style == "tactical":
+                    return tactical_temperature_schedule(move_num)
                 else:
-                    # Stochastic: sample from distribution
-                    actions = list(action_probs.keys())
-                    probabilities = list(action_probs.values())
-                    action = np.random.choice(actions, p=probabilities)
-                
-                # Apply the selected action
-                current_position = current_position.apply_action(action)
-                move_count += 1
-                
-            except Exception as e:
-                self.logger.warning(f"Error during move {move_count} in game {game_id}: {e}")
-                break
-        
-        # Determine final game result
-        if current_position.is_terminal():
-            final_reward = current_position.get_reward()
-            termination_reason = "natural"
-        else:
-            # Game didn't finish naturally - treat as draw
-            final_reward = 0.0
-            termination_reason = f"move_limit({max_moves})"
-        
-        # Update all training examples with final outcome
-        for i, example in enumerate(training_examples):
-            # Outcome is from perspective of the player who made that move
-            if example.current_player == current_position.get_current_player():
-                example.outcome = final_reward
+                    return 1.0  # Standard exploration
             else:
-                example.outcome = -final_reward
+                return 0.0  # Deterministic play
         
-        # Debug: Log game outcome for analysis
-        outcome_str = "White wins" if final_reward == 1.0 else "Black wins" if final_reward == -1.0 else "Draw"
-        self.logger.info(f"Game outcome: {outcome_str} (final_reward={final_reward}) - {termination_reason}")
+        try:
+            # Use the enhanced MCTS self-play implementation
+            training_examples, final_state, move_history, game_resigned, winner = generate_self_play_game(
+                chess_engine=mcts_engine,
+                initial_state=initial_position,
+                num_simulations=mcts_simulations,
+                temperature_schedule=style_temperature_schedule,
+                max_moves=150,
+                enable_resignation=True
+            )
+            
+            if not training_examples:
+                self.logger.warning(f"Game {game_id} generated no training examples")
+                return None
+            
+            # Calculate final reward from the last example
+            final_reward = training_examples[-1].outcome if training_examples else 0.0
+            
+            # Determine game outcome for logging using the explicit winner
+            if game_resigned:
+                if winner == 1:
+                    outcome_str = "White wins by resignation"
+                elif winner == -1:
+                    outcome_str = "Black wins by resignation"
+                else:
+                    outcome_str = "Draw by resignation"  # Shouldn't happen but handle gracefully
+            else:
+                if winner == 1:
+                    outcome_str = "White wins"
+                elif winner == -1:
+                    outcome_str = "Black wins"
+                else:
+                    outcome_str = "Draw"
+            
+            self.logger.info(f"Game {game_id}: {outcome_str} after {len(training_examples)} moves")
+            
+            # Save board images if enabled
+            if save_board_images:
+                self._save_game_board_images(initial_position, final_state, training_examples, game_id, opening, outcome_str, board_images_dir, move_history)
+            
+            # Calculate style adherence (simplified - based on opening usage)
+            opening_moves_played = len(opening.moves) if opening else 0
+            style_adherence = min(opening_moves_played / max(len(training_examples), 1), 1.0) if opening else 0.0
+            
+            return SelfPlayGameResult(
+                training_examples=training_examples,
+                game_length=len(training_examples),
+                final_result=final_reward,
+                opening_used=opening.name if opening else None,
+                style_adherence=style_adherence
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Error generating game {game_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def _save_game_board_images(self, initial_position: ChessPosition, 
+                               final_state: ChessGameState,
+                               training_examples: List[AlphaZeroTrainingExample],
+                               game_id: str, opening: Optional[OpeningTemplate], 
+                               outcome_str: str, board_images_dir: str = "board_images",
+                               move_history: List[dict] = None) -> None:
+        """
+        Save starting and ending board positions as images, plus complete move history as JSON.
         
-        # Calculate style adherence (simplified - based on opening usage)
-        style_adherence = min(opening_moves_played / max(move_count, 1), 1.0) if opening else 0.0
+        Args:
+            initial_position: Starting chess position
+            final_state: Final chess game state
+            training_examples: List of training examples from the game
+            game_id: Unique game identifier
+            opening: Opening used (if any)
+            outcome_str: Human-readable game outcome
+            board_images_dir: Directory to save board images
+            move_history: Complete list of moves with FENs
+        """
+        try:
+            # Create a subdirectory for this game
+            game_dir = os.path.join(board_images_dir, game_id)
+            os.makedirs(game_dir, exist_ok=True)
+            
+            # Save starting position
+            opening_name = opening.name if opening else "random"
+            start_filename = os.path.join(game_dir, f"start_{opening_name}")
+            start_title = f"Game {game_id} - Start Position\nOpening: {opening_name}"
+            
+            if save_board_image(initial_position.board, start_filename, start_title):
+                self.logger.debug(f"Saved starting position for game {game_id}")
+            
+            # Save final position using the actual final state
+            end_filename = os.path.join(game_dir, f"end_{outcome_str.replace(' ', '_')}")
+            end_title = f"Game {game_id} - End Position\nOutcome: {outcome_str}\nMoves: {len(training_examples)}"
+            
+            if save_board_image(final_state.board, end_filename, end_title):
+                self.logger.debug(f"Saved ending position for game {game_id}")
+            
+            # Save complete move history as JSON
+            if move_history:
+                game_data = {
+                    "game_id": game_id,
+                    "opening": {
+                        "name": opening_name,
+                        "moves": opening.moves if opening else []
+                    },
+                    "outcome": outcome_str,
+                    "total_moves": len(training_examples),
+                    "starting_fen": initial_position.board.fen(),
+                    "final_fen": final_state.board.fen(),
+                    "move_history": move_history,
+                    "metadata": {
+                        "game_length": len(move_history) - 1,  # -1 because first entry is starting position
+                        "opening_moves_played": len(opening.moves) if opening else 0,
+                        "resignation": "resignation" in outcome_str.lower()
+                    }
+                }
+                
+                json_file = os.path.join(game_dir, "game_moves.json")
+                with open(json_file, 'w') as f:
+                    json.dump(game_data, f, indent=2)
+                self.logger.debug(f"Saved move history JSON for game {game_id}")
+            
+            # Create a summary file with game info
+            summary_file = os.path.join(game_dir, "game_info.txt")
+            with open(summary_file, 'w') as f:
+                f.write(f"Game ID: {game_id}\n")
+                f.write(f"Opening: {opening_name}\n")
+                f.write(f"Outcome: {outcome_str}\n")
+                f.write(f"Total Moves: {len(training_examples)}\n")
+                f.write(f"Starting FEN: {initial_position.board.fen()}\n")
+                f.write(f"Final FEN: {final_state.board.fen()}\n")
+                if opening and opening.moves:
+                    f.write(f"Opening Moves: {' '.join(opening.moves)}\n")
+            
+            self.logger.info(f"📷 Saved board images for game {game_id} to {game_dir}")
         
-        return SelfPlayGameResult(
-            training_examples=training_examples,
-            game_length=move_count,
-            final_result=final_reward,
-            opening_used=opening.name if opening else None,
-            style_adherence=style_adherence
-        )
+        except Exception as e:
+            self.logger.error(f"Failed to save board images for game {game_id}: {e}")
     
     def _select_opening_for_style(self, style: str) -> Optional[OpeningTemplate]:
         """

@@ -61,6 +61,7 @@ src/explainability/
 src/federated/
 src/utils/
 /docs/
+test_board_images/
 
 # Temporary ignored files
 src/training/reward_shaping.py

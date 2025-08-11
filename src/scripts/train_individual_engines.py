@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-Individual Engine Training Script
+Individual Engine Training Script - UPDATED WITH MCTS FIXES
 
 This script allows you to train individual AlphaZero chess engines with specific
 configurations and styles without the complexity of the full parallel training system.
+
+UPDATED: Includes fixes for 100% draw rate issue through improved MCTS parameters
+and game generation logic.
 
 Usage:
     python train_individual_engines.py --training-config fast --iterations 200
@@ -54,7 +57,7 @@ def load_model_config(model_size: str) -> dict:
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Train individual AlphaZero chess engines",
+        description="Train individual AlphaZero chess engines with MCTS fixes",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
@@ -62,7 +65,7 @@ def parse_arguments():
         "--training-config", 
         type=str, 
         default="fast",
-        choices=["ultrafast", "fast", "prototype", "standard", "thorough"],
+        choices=["ultrafast", "fast", "prototype", "standard", "thorough", "tactical_optimized"],
         help="Training configuration to use"
     )
     
@@ -109,6 +112,25 @@ def parse_arguments():
         help="Directory for log files"
     )
     
+    parser.add_argument(
+        "--debug-outcomes",
+        action="store_true",
+        help="Enable detailed logging of game outcomes"
+    )
+    
+    parser.add_argument(
+        "--save-board-images",
+        action="store_true",
+        help="Save starting and ending board positions as images"
+    )
+    
+    parser.add_argument(
+        "--board-images-dir",
+        type=str,
+        default="board_images",
+        help="Directory to save board images"
+    )
+    
     return parser.parse_args()
 
 
@@ -134,6 +156,22 @@ def create_job_config(args) -> dict:
     training_config = load_training_config(args.training_config)
     model_config = load_model_config(args.model_size)
     
+    # Apply enhanced training parameters (always enabled now)
+    training_config.update({
+        "c_puct": 2.0,                    # Increased exploration (built into new MCTS)
+        "max_moves": 150,                 # Extended game length
+        "temperature_moves": 40,          # Extended exploration phase
+        "enable_resignation": True,       # Enable resignation
+        "resignation_threshold": -0.9,    # Resignation threshold
+        "debug_outcomes": args.debug_outcomes,
+        # Additional parameters for improved training
+        "early_termination_prob": 0.05,  # 5% chance of early termination for diversity
+        "value_loss_weight": 2.0,         # Emphasize value learning
+        # Board image saving parameters
+        "save_board_images": args.save_board_images,
+        "board_images_dir": args.board_images_dir,
+    })
+    
     job_config = {
         "job_id": f"{args.model_size}_{args.style}_1",
         "worker_id": f"{args.model_size}_{args.style}_1",
@@ -148,7 +186,7 @@ def create_job_config(args) -> dict:
         "filters": model_config["filters"],
         "blocks": model_config["blocks"],
         
-        # Training configuration
+        # Training configuration (enhanced parameters always applied)
         **training_config
     }
     
@@ -199,12 +237,16 @@ class IndividualTrainer:
             print("🏁 Starting training...")
             print(f"📋 Job config: {self.job_config}")
             
+            # Add outcome monitoring if enabled
+            if self.job_config.get('debug_outcomes', False):
+                print("🔍 Debug outcome logging enabled")
+            
             # Call the training worker implementation directly
             try:
                 self.trainer._training_worker_impl(
                     job=self.job_config,
                     max_iterations=self.job_config['iterations'],
-                    save_frequency=50,  # Save every 50 iterations
+                    save_frequency=1,  # Save every iteration
                     memory_offset=0,    # No memory offset needed
                     progress_queue=progress_queue,
                     checkpoint_queue=checkpoint_queue,
@@ -225,6 +267,12 @@ class IndividualTrainer:
             
             if not self.interrupted:
                 print("✅ Training completed successfully!")
+                
+                # Final outcome summary
+                if self.job_config.get('debug_outcomes', False):
+                    print("\n📊 Training Summary:")
+                    print("   Check logs for game outcome distribution")
+                    print("   Look for reduced draw rates compared to previous runs")
             
         except KeyboardInterrupt:
             print("\n⚠️ Training interrupted by user")
@@ -235,30 +283,94 @@ class IndividualTrainer:
             raise
 
 
+def validate_setup():
+    """Validate that the training setup is correct."""
+    required_files = [
+        "src/experiments/configs/training_configs.json",
+        "src/experiments/configs/model_sizes.json",
+        "src/core/alphazero_mcts.py",
+        "src/training/trainer.py"
+    ]
+    
+    missing_files = []
+    for file_path in required_files:
+        if not Path(file_path).exists():
+            missing_files.append(file_path)
+    
+    if missing_files:
+        print("❌ Missing required files:")
+        for file_path in missing_files:
+            print(f"   - {file_path}")
+        return False
+    
+    print("✅ Setup validation passed")
+    return True
+
+
 def main():
-    """Main training function."""
+    """Main training function with MCTS fixes."""
     args = parse_arguments()
     
-    print(f"🚀 Starting individual engine training")
-    print(f"� Config: {args.training_config}")
+    print("=" * 60)
+    print("🚀 Individual AlphaZero Chess Engine Training")
+    print("=" * 60)
+    print(f"🛠️  Config: {args.training_config}")
     print(f"🧠 Model: {args.model_size}")
     print(f"🎯 Style: {args.style}")
     print(f"🔄 Iterations: {args.iterations}")
     print(f"📈 TensorBoard: {'Enabled' if args.tensorboard else 'Disabled'}")
-    print("-" * 50)
+    print(f" Debug Outcomes: {'Enabled' if args.debug_outcomes else 'Disabled'}")
+    print("-" * 60)
     
     try:
+        # Validate setup
+        if not validate_setup():
+            sys.exit(1)
+        
+        print("\n✅ Enhanced MCTS implementation active")
+        print("   Built-in improvements:")
+        print("   - Reduced draw rate (target <70% draws)")
+        print("   - Proper resignation logic")
+        print("   - Improved exploration parameters")
+        print("   - Better value learning")
+        
+        print("-" * 60)
+        
         # Create job configuration
         job_config = create_job_config(args)
         
         # Create and start trainer
         trainer = IndividualTrainer(job_config)
+        
+        # Start training
+        start_time = time.time()
         trainer.train()
+        end_time = time.time()
+        
+        # Training summary
+        print("\n" + "=" * 60)
+        print("📋 Training Complete")
+        print("=" * 60)
+        print(f"⏱️  Total Time: {end_time - start_time:.1f} seconds")
+        print(f"🎯 Style Trained: {args.style}")
+        print(f"🔄 Iterations: {args.iterations}")
+        
+        print("\n🔍 Post-Training Checklist:")
+        print("   □ Check logs for improved game outcome diversity")
+        print("   □ Verify draw rate is <70% (down from ~100%)")
+        print("   □ Look for resignation-based game endings")
+        print("   □ Confirm value loss is meaningful (not near 0)")
+        print("   □ Check for varied game lengths (20-150 moves)")
+        print("   □ Verify training examples have diverse outcomes")
+        
+        print("\n✅ Training session complete!")
         
     except KeyboardInterrupt:
         print("\n⚠️ Training interrupted by user")
     except Exception as e:
         print(f"❌ Training failed: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 

@@ -404,27 +404,7 @@ class ChessPosition(ChessGameState):
     def pgn(self) -> str:
         """Return PGN representation of the game."""
         return str(self.board)
-    
-    def get_position_repetitions(self) -> int:
-        """
-        Get number of times the current position has appeared in the game.
         
-        Returns:
-            Number of repetitions of current position (1, 2, or 3+)
-        """
-        current_fen = self.board.fen().split(' ')[0]  # Board position only
-        
-        repetitions = 1  # Current position counts as 1
-        for board in self.history:
-            if board.fen().split(' ')[0] == current_fen:
-                repetitions += 1
-        
-        return repetitions
-    
-    def is_threefold_repetition(self) -> bool:
-        """Check if current position is a threefold repetition."""
-        return self.get_position_repetitions() >= 3
-    
     def get_history_length(self) -> int:
         """Get the number of positions in history (not including current)."""
         return len(self.history)
@@ -450,3 +430,71 @@ class ChessPosition(ChessGameState):
             position = position.apply_action(move)
         
         return position
+
+
+def evaluate_material_balance(board: chess.Board) -> float:
+    """
+    Evaluate material balance from the perspective of the current player to move.
+    
+    Args:
+        board: Chess board position
+        
+    Returns:
+        Material balance in centipawns (positive = advantage for current player)
+    """
+    # Standard piece values in centipawns
+    PIECE_VALUES = {
+        chess.PAWN: 100,
+        chess.KNIGHT: 320,
+        chess.BISHOP: 330,
+        chess.ROOK: 500,
+        chess.QUEEN: 900,
+        chess.KING: 0  # King has no material value
+    }
+    
+    white_material = 0
+    black_material = 0
+    
+    # Count material for both sides
+    for square in chess.SQUARES:
+        piece = board.piece_at(square)
+        if piece is not None:
+            value = PIECE_VALUES[piece.piece_type]
+            if piece.color == chess.WHITE:
+                white_material += value
+            else:
+                black_material += value
+    
+    # Return material advantage from current player's perspective
+    if board.turn == chess.WHITE:
+        return white_material - black_material
+    else:
+        return black_material - white_material
+
+
+def is_material_advantage_overwhelming(board: chess.Board, threshold_centipawns: int = 500) -> bool:
+    """
+    Check if current player has an overwhelming material advantage that should trigger resignation.
+    
+    Args:
+        board: Chess board position
+        threshold_centipawns: Minimum material advantage to consider overwhelming (default: 500 = 5 pawns)
+        
+    Returns:
+        True if current player has overwhelming material advantage
+    """
+    return evaluate_material_balance(board) >= threshold_centipawns
+
+
+def should_resign_material(board: chess.Board, threshold_centipawns: int = 500) -> bool:
+    """
+    Check if current player should resign due to overwhelming material disadvantage.
+    
+    Args:
+        board: Chess board position  
+        threshold_centipawns: Minimum material disadvantage to trigger resignation (default: 500 = 5 pawns)
+        
+    Returns:
+        True if current player should resign due to material disadvantage
+    """
+    return evaluate_material_balance(board) <= -threshold_centipawns
