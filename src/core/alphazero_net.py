@@ -14,6 +14,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))  # Ensure src is in path
+
 from src.config.model_config import get_model_config
 
 class ResidualBlock(nn.Module):

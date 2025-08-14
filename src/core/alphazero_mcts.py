@@ -17,8 +17,11 @@ import chess
 import torch
 import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple, Any
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))  # Ensure src is in path
 
-from .game_utils import ChessGameState, should_resign_material
+from src.core.game_utils import ChessGameState, should_resign_material
 
 
 class AlphaZeroNode:
