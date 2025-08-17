@@ -1,9 +1,15 @@
 """
-Parallel Trainer for Multi-Model AlphaZero Training
+Parallel Trainer for Multi-Model AlphaZero Training - DEDUPLICATED VERSION
 
-This module provides TRUE parallel training capabilities for multiple AlphaZero models
-with different sizes and styles, using multiprocessing for concurrent training.
-Includes comprehensive TensorBoard logging for real-time monitoring.
+This module provides parallel training capabilities for multiple AlphaZero models
+with all shared utilities centralized in training_utils.py to eliminate duplication.
+
+Key improvements:
+1. All shared logic moved to training_utils.py
+2. Consistent use of centralized temperature schedules
+3. Unified action sampling and Dirichlet noise
+4. Centralized game outcome analysis
+5. Proper separation of concerns
 
 Author: Francesco Finucci
 """
@@ -22,6 +28,15 @@ import time
 
 from ..core.alphazero_net import AlphaZeroNet
 
+# DEDUPLICATED: Import centralized utilities
+from ..training.training_utils import (
+    TrainingUtilities,
+    TemperatureSchedules,
+    TrainingExampleFilters,
+    GameOutcomeAnalyzer,
+    GameResult
+)
+
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_AVAILABLE = True
@@ -39,16 +54,6 @@ def _global_training_worker(trainer_config: Dict[str, Any], job: Dict[str, Any],
     
     This function recreates a trainer instance in the worker process and calls
     the actual training logic. This avoids pickling issues with instance methods.
-    
-    Args:
-        trainer_config: Configuration needed to recreate trainer
-        job: Training job configuration
-        max_iterations: Maximum number of training iterations
-        save_frequency: How often to save checkpoints
-        memory_offset: GPU memory offset for this worker
-        progress_queue: Queue for progress updates
-        checkpoint_queue: Queue for checkpoint notifications
-        error_queue: Queue for error reporting
     """
     try:
         # Create a minimal trainer instance in the worker process
@@ -74,24 +79,16 @@ def _global_training_worker(trainer_config: Dict[str, Any], job: Dict[str, Any],
 
 class ParallelTrainer:
     """
-    Manages parallel training of multiple AlphaZero models with different sizes and styles.
+    Manages parallel training of multiple AlphaZero models - DEDUPLICATED VERSION.
     
-    Handles:
-    - Multi-model resource allocation across 24GB VRAM
-    - Self-play coordination with style-specific engines
-    - Checkpointing and monitoring
-    - Adaptive learning rate scheduling
+    All shared training utilities have been moved to training_utils.py to eliminate
+    duplication between this module, MCTS, and self-play modules.
     """
     
-    def __init__(self, config_dir: str = "src/experiments/configs", device: str = "cuda", clear_logs: bool = True, setup_logging: bool = True):
+    def __init__(self, config_dir: str = "src/experiments/configs", device: str = "cuda", 
+                 clear_logs: bool = True, setup_logging: bool = True):
         """
         Initialize the ParallelTrainer for multi-model training.
-        
-        Args:
-            config_dir: Directory containing JSON configuration files
-            device: PyTorch device for training ("cuda" or "cpu")
-            clear_logs: Whether to clear existing logs (only for main process)
-            setup_logging: Whether to setup logging (False for worker processes)
         """
         self.config_dir = Path(config_dir)
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
@@ -138,24 +135,12 @@ class ParallelTrainer:
         else:
             self.logger.info("TensorBoard integration enabled")
         
-        # Setup default training combination (3 small + standard, 3 micro + prototype)
+        # Setup default training combination
         self.default_training_jobs = self._create_default_training_jobs()
         self.logger.info(f"Created {len(self.default_training_jobs)} default training jobs")
     
     def _load_experiment_configs(self) -> Dict[str, Any]:
-        """
-        Load all experiment configurations from JSON files (private method).
-        
-        Returns:
-            Dictionary containing:
-            - model_sizes: Architecture configurations (nano, micro, small, etc.)
-            - training_configs: Training parameter sets (prototype, standard, thorough)
-            - default_combinations: Predefined model+training combinations
-        
-        Raises:
-            FileNotFoundError: If config files are missing
-            ValueError: If config structure is invalid
-        """
+        """Load all experiment configurations from JSON files."""
         configs = {
             'model_sizes': {},
             'training_configs': {},
@@ -195,15 +180,7 @@ class ParallelTrainer:
         return configs
     
     def _validate_configs(self, configs: Dict[str, Any]) -> None:
-        """
-        Validate that configurations have required fields and valid values.
-        
-        Args:
-            configs: Configuration dictionary to validate
-            
-        Raises:
-            ValueError: If required fields are missing or invalid
-        """
+        """Validate that configurations have required fields and valid values."""
         # Validate model sizes
         for model_name, model_config in configs['model_sizes'].items():
             required_fields = ['filters', 'blocks', 'description']
@@ -245,20 +222,12 @@ class ParallelTrainer:
     def _create_default_combinations(self, configs: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         Create default model+training combinations for parallel training.
-        
-        Default setup: 3 small + standard, 3 micro + prototype
-        
-        Args:
-            configs: Loaded configuration dictionary
-            
-        Returns:
-            List of training job configurations
         """
         combinations = []
         
         # Check if required model sizes and training configs exist
-        required_models = ['small', 'micro']
-        required_training = ['standard', 'prototype']
+        required_models = ['micro']
+        required_training = ['fast']
         
         for model in required_models:
             if model not in configs['model_sizes']:
@@ -268,19 +237,8 @@ class ParallelTrainer:
             if training not in configs['training_configs']:
                 raise ValueError(f"Required training config '{training}' not found in configuration")
         
-        # Create 3 small models with standard training
-        #styles = ['tactical', 'positional', 'dynamic']
+        # Create micro models with fast training  
         styles = ['positional']
-        # for i, style in enumerate(styles):
-        #     combinations.append({
-        #         'job_id': f'small_{style}_{i+1}',
-        #         'model_size': 'small',
-        #         'training_config': 'standard',
-        #         'style': style,
-        #         'description': f'Small model with {style} style using standard training'
-        #     })
-        
-        # Create 3 micro models with prototype training  
         for i, style in enumerate(styles):
             combinations.append({
                 'job_id': f'micro_{style}_{i+1}',
@@ -294,12 +252,7 @@ class ParallelTrainer:
         return combinations
     
     def _create_default_training_jobs(self) -> List[Dict[str, Any]]:
-        """
-        Create training job specifications from default combinations.
-        
-        Returns:
-            List of detailed training job specifications
-        """
+        """Create training job specifications from default combinations."""
         training_jobs = []
         
         for combo in self.configs['default_combinations']:
@@ -346,9 +299,7 @@ class ParallelTrainer:
         return training_jobs
     
     def _clear_existing_logs(self) -> None:
-        """
-        Clear existing log files to start fresh.
-        """
+        """Clear existing log files to start fresh."""
         log_dir = Path("logs")
         if log_dir.exists():
             # Remove worker logs
@@ -356,7 +307,7 @@ class ParallelTrainer:
                 try:
                     log_file.unlink()
                 except Exception:
-                    pass  # Ignore errors if file is locked or doesn't exist
+                    pass
             
             # Remove parallel trainer logs
             for log_file in log_dir.glob("parallel_trainer_*.log"):
@@ -373,15 +324,10 @@ class ParallelTrainer:
                 shutil.rmtree(tensorboard_dir)
                 tensorboard_dir.mkdir(parents=True, exist_ok=True)
             except Exception:
-                pass  # Ignore errors if directory is locked
+                pass
 
     def _setup_logging(self) -> logging.Logger:
-        """
-        Setup logging for the parallel trainer.
-        
-        Returns:
-            Configured logger instance
-        """
+        """Setup logging for the parallel trainer."""
         logger = logging.getLogger(f"ParallelTrainer_{id(self)}")
         logger.setLevel(logging.INFO)
         
@@ -417,21 +363,9 @@ class ParallelTrainer:
     
     def start_parallel_training(self, max_iterations: int = 1000, save_frequency: int = 50) -> None:
         """
-        Start TRUE parallel training - each model trains in its own process simultaneously.
-        
-        Creates separate processes for each training job, with proper GPU memory allocation
-        and inter-process communication for monitoring and coordination.
-        
-        Args:
-            max_iterations: Maximum number of training iterations per model
-            save_frequency: Save checkpoints every N iterations
-            
-        Process Architecture:
-        - Main process: Coordination, monitoring, checkpointing
-        - 6 worker processes: Independent model training with GPU memory isolation
-        - Shared queues: Inter-process communication for progress tracking
+        Start parallel training with deduplicated utilities.
         """
-        self.logger.info(f"Starting TRUE parallel training for {len(self.default_training_jobs)} models")
+        self.logger.info(f"Starting parallel training for {len(self.default_training_jobs)} models")
         self.logger.info(f"Max iterations: {max_iterations}, Save frequency: {save_frequency}")
         
         # Set multiprocessing start method
@@ -445,10 +379,6 @@ class ParallelTrainer:
         
         # Calculate GPU memory allocation per process
         self._calculate_gpu_memory_allocation()
-        
-        # Create shared directory for inter-process coordination
-        self.coordination_dir = Path("coordination")
-        self.coordination_dir.mkdir(exist_ok=True)
         
         # Start all training processes
         self.processes = []
@@ -465,8 +395,8 @@ class ParallelTrainer:
                 
                 # Create process for this training job
                 trainer_config = {
-                    'config_dir': self.config_dir,
-                    'device': self.device,
+                    'config_dir': str(self.config_dir),
+                    'device': str(self.device),
                     'memory_per_process': self.memory_per_process,
                     'tensorboard_dir': str(self.tensorboard_dir)
                 }
@@ -497,9 +427,7 @@ class ParallelTrainer:
                 }
                 
                 self.logger.info(f"Started process for {job_id} (PID: {process.pid})")
-                
-                # Small delay to stagger GPU memory allocation
-                time.sleep(2)
+                time.sleep(2)  # Small delay to stagger GPU memory allocation
             
             self.logger.info(f"All {len(self.processes)} training processes started successfully")
             
@@ -519,11 +447,7 @@ class ParallelTrainer:
             self._cleanup_parallel_training()
     
     def _calculate_gpu_memory_allocation(self) -> None:
-        """
-        Calculate GPU memory allocation per training process.
-        
-        Divides available GPU memory among training processes with safety margin.
-        """
+        """Calculate GPU memory allocation per training process."""
         if not torch.cuda.is_available():
             self.logger.warning("CUDA not available - training will use CPU")
             self.memory_per_process = 0
@@ -554,19 +478,9 @@ class ParallelTrainer:
                              memory_offset: int, progress_queue: mp.Queue, 
                              checkpoint_queue: mp.Queue, error_queue: mp.Queue) -> None:
         """
-        Implementation of the training worker logic.
+        Implementation of the training worker logic - DEDUPLICATED VERSION.
         
-        Runs in separate process with isolated GPU memory, independent training loop,
-        and dedicated TensorBoard logging.
-        
-        Args:
-            job: Training job configuration
-            max_iterations: Maximum training iterations
-            save_frequency: Checkpoint save frequency
-            memory_offset: GPU memory offset for this process
-            progress_queue: Queue for progress updates
-            checkpoint_queue: Queue for checkpoint notifications
-            error_queue: Queue for error reporting
+        Now uses centralized utilities from training_utils.py.
         """
         job_id = job['job_id']
         
@@ -595,7 +509,6 @@ class ParallelTrainer:
                 - Batch Size: {job['batch_size']}
                 - MCTS Simulations: {job['mcts_simulations']}
                 - Games per Iteration: {job['games_per_iteration']}
-                - Dirichlet Alpha: {job['dirichlet_alpha']}
                 - Temperature Moves: {job['temperature_moves']}
                 """
                 tensorboard_writer.add_text("Configuration", config_text, 0)
@@ -610,9 +523,9 @@ class ParallelTrainer:
             # Initialize model and training components for this worker
             model, optimizer, scheduler = self._initialize_worker_components(job)
             
-            # Import self-play functionality
+            # DEDUPLICATED: Import self-play functionality
             from .self_play import StyleSpecificSelfPlay
-            self_play_coordinator = StyleSpecificSelfPlay(device=self.device, logger=worker_logger)
+            self_play_coordinator = StyleSpecificSelfPlay(device=str(self.device), logger=worker_logger)
             
             worker_logger.info(f"Worker {job_id} initialized - starting training loop")
             
@@ -636,10 +549,13 @@ class ParallelTrainer:
                         style=job['style'],
                         num_games=job['games_per_iteration'],
                         mcts_simulations=job['mcts_simulations'],
-                        dirichlet_alpha=job['dirichlet_alpha'],
+                        dirichlet_alpha=job['dirichlet_alpha'],  # Still passed but handled centrally
                         temperature_moves=job['temperature_moves'],
                         save_board_images=job.get('save_board_images', False),
-                        board_images_dir=job.get('board_images_dir', 'board_images')
+                        board_images_dir=job.get('board_images_dir', 'board_images'),
+                        enable_resignation=job.get('enable_resignation', True),
+                        resignation_threshold=job.get('resignation_threshold', -0.9),
+                        max_moves=job.get('max_moves', 150)
                     )
                     games_time = time.time() - games_start
                     games_per_second = job['games_per_iteration'] / games_time if games_time > 0 else 0
@@ -647,17 +563,27 @@ class ParallelTrainer:
                     worker_logger.info(f"Generated {len(training_examples)} training examples")
                     games_per_second_history.append(games_per_second)
                     
+                    # Check if we have any training examples
+                    if len(training_examples) == 0:
+                        worker_logger.warning("No training examples generated - all games were draws!")
+                        worker_logger.warning("Skipping this iteration and continuing...")
+                        continue
+                    
                     # Train model on generated data
                     worker_logger.info(f"Starting neural network training on {len(training_examples)} examples...")
                     training_start = time.time()
-                    loss_dict = self._worker_train_model_detailed(model, optimizer, training_examples, job)
+                    loss_dict = self._worker_train_model_detailed(model, optimizer, training_examples, job, worker_logger)
                     training_time = time.time() - training_start
                     worker_logger.info(f"Neural network training completed in {training_time:.2f}s")
                     
                     total_loss = loss_dict['total_loss']
                     policy_loss = loss_dict['policy_loss']
                     value_loss = loss_dict['value_loss']
-                    worker_logger.info(f"Training losses - Total: {total_loss:.4f}, Policy: {policy_loss:.4f}, Value: {value_loss:.4f}")
+                    worker_logger.info(f"Training losses - Total: {total_loss:.6f}, Policy: {policy_loss:.6f}, Value: {value_loss:.6f}")
+                    
+                    # Check for problematic value loss
+                    if value_loss < 1e-8:
+                        worker_logger.warning(f"⚠️  Very low value loss ({value_loss:.8f}) - possible double-tanh issue!")
                     
                     # Update learning rate scheduler
                     old_lr = optimizer.param_groups[0]['lr']
@@ -693,6 +619,10 @@ class ParallelTrainer:
                         tensorboard_writer.add_scalar('Performance/SelfPlay_Time_Seconds', games_time, global_step)
                         tensorboard_writer.add_scalar('Performance/Total_Games_Played', total_games_played, global_step)
                         
+                        # Enhanced training data tracking
+                        tensorboard_writer.add_scalar('Data/Training_Examples_Count', len(training_examples), global_step)
+                        tensorboard_writer.add_scalar('Data/Decisive_Games_Ratio', len(training_examples) / max(job['games_per_iteration'], 1), global_step)
+                        
                         # Model architecture info (logged once)
                         if iteration == 0:
                             total_params = sum(p.numel() for p in model.parameters())
@@ -706,9 +636,6 @@ class ParallelTrainer:
                             gpu_memory_reserved = torch.cuda.memory_reserved() / (1024**3)    # GB
                             tensorboard_writer.add_scalar('System/GPU_Memory_Allocated_GB', gpu_memory_allocated, global_step)
                             tensorboard_writer.add_scalar('System/GPU_Memory_Reserved_GB', gpu_memory_reserved, global_step)
-                        
-                        # Training examples statistics
-                        tensorboard_writer.add_scalar('Data/Training_Examples_Count', len(training_examples), global_step)
                         
                         # Moving averages
                         if len(games_per_second_history) >= 10:
@@ -767,6 +694,9 @@ class ParallelTrainer:
                 except Exception as e:
                     error_msg = f"Error in training iteration {iteration + 1} for {job_id}: {str(e)}"
                     worker_logger.error(error_msg)
+                    import traceback
+                    worker_logger.error(f"Full traceback: {traceback.format_exc()}")
+                    
                     error_queue.put({
                         'job_id': job_id,
                         'iteration': iteration + 1,
@@ -828,13 +758,9 @@ class ParallelTrainer:
             # Close TensorBoard writer on fatal error
             if 'tensorboard_writer' in locals() and tensorboard_writer is not None:
                 tensorboard_writer.close()
-            
+    
     def _coordinate_parallel_training(self, max_iterations: int, save_frequency: int) -> None:
-        """
-        Main coordination loop for monitoring parallel training processes.
-        
-        Handles progress monitoring, error handling, and coordination between processes.
-        """
+        """Main coordination loop for monitoring parallel training processes."""
         self.logger.info("Starting coordination of parallel training processes")
         
         completed_processes = set()
@@ -885,9 +811,6 @@ class ParallelTrainer:
                         if error_info.get('fatal'):
                             self.logger.error(f"FATAL ERROR in {job_id}: {error_info['error']}")
                             self.process_status[job_id]['status'] = 'failed'
-                            
-                            # Consider restarting the failed process
-                            # For now, just log and continue with other processes
                         else:
                             self.logger.warning(f"Error in {job_id}: {error_info['error']}")
                             
@@ -1053,71 +976,17 @@ class ParallelTrainer:
         
         return model, optimizer, scheduler
     
-    def _worker_train_model(self, model: AlphaZeroNet, optimizer: torch.optim.Optimizer, 
-                           training_examples: List[Any], job: Dict[str, Any]) -> float:
-        """Train model in worker process."""
-        if not training_examples:
-            return 0.0
-                    
-        model.train()
-        total_loss = 0.0
-        num_batches = 0
-        batch_size = job['batch_size']
-        
-        # Create batches
-        for i in range(0, len(training_examples), batch_size):
-            batch = training_examples[i:i + batch_size]
-            
-            try:
-                # Prepare batch tensors
-                states = torch.stack([ex.state_tensor for ex in batch]).to(self.device)
-                
-                # Policy targets
-                policy_targets = torch.zeros(len(batch), 4672).to(self.device)
-                for j, ex in enumerate(batch):
-                    for action, prob in ex.action_probs.items():
-                        try:
-                            action_idx = self._action_to_index(action)
-                            if 0 <= action_idx < 4672:
-                                policy_targets[j, action_idx] = prob
-                        except:
-                            continue
-                
-                # Value targets
-                value_targets = torch.tensor([ex.outcome for ex in batch], 
-                                           dtype=torch.float32).to(self.device)
-                
-                # Forward pass
-                policy_logits, values = model(states)
-                values = values.squeeze()
-                
-                # Compute losses
-                policy_loss = F.cross_entropy(policy_logits, policy_targets)
-                value_loss = F.mse_loss(values, value_targets)
-                total_loss_batch = policy_loss + value_loss
-                
-                # Backward pass
-                optimizer.zero_grad()
-                total_loss_batch.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
-                
-                total_loss += total_loss_batch.item()
-                num_batches += 1
-                
-            except Exception as e:
-                continue  # Skip problematic batches
-        
-        return total_loss / num_batches if num_batches > 0 else 0.0
-    
     def _worker_train_model_detailed(self, model: AlphaZeroNet, optimizer: torch.optim.Optimizer, 
-                                   training_examples: List[Any], job: Dict[str, Any]) -> Dict[str, float]:
-        """Train model in worker process with detailed loss breakdown for TensorBoard."""
+                                   training_examples: List[Any], job: Dict[str, Any], 
+                                   worker_logger: logging.Logger) -> Dict[str, float]:
+        """
+        Train model in worker process with detailed loss breakdown - DEDUPLICATED VERSION.
+        
+        Now uses centralized training utilities where applicable.
+        """
         if not training_examples:
             return {'total_loss': 0.0, 'policy_loss': 0.0, 'value_loss': 0.0}
             
-        import torch.nn.functional as F
-        
         model.train()
         total_loss = 0.0
         total_policy_loss = 0.0
@@ -1125,6 +994,21 @@ class ParallelTrainer:
         num_batches = 0
         batch_size = job['batch_size']
         
+        # Analyze training data before training
+        outcomes = [ex.outcome for ex in training_examples]
+        outcome_stats = {
+            'wins': sum(1 for o in outcomes if o > 0.5),
+            'losses': sum(1 for o in outcomes if o < -0.5),
+            'draws': sum(1 for o in outcomes if abs(o) <= 0.5),
+            'avg_outcome': sum(outcomes) / len(outcomes),
+            'outcome_range': (min(outcomes), max(outcomes))
+        }
+        
+        worker_logger.info(f"Training data analysis: {outcome_stats}")
+        
+        if outcome_stats['draws'] == len(training_examples):
+            worker_logger.warning("⚠️  ALL TRAINING EXAMPLES ARE DRAWS - This will prevent value learning!")
+        
         # Create batches
         for i in range(0, len(training_examples), batch_size):
             batch = training_examples[i:i + batch_size]
@@ -1150,20 +1034,29 @@ class ParallelTrainer:
                 
                 # Forward pass
                 policy_logits, values = model(states)
-                values = values.squeeze()
                 
-                # Debug: Log value targets and predictions for analysis
-                if num_batches == 0:  # Only log first batch to avoid spam
+                # Apply tanh to values since we removed it from forward()
+                values = torch.tanh(values).squeeze()
+                
+                # Debug: Log value predictions vs targets for first batch
+                if num_batches == 0:
                     value_targets_np = value_targets.detach().cpu().numpy()
                     values_np = values.detach().cpu().numpy()
                     unique_targets = set(value_targets_np.round(3))
-                    self.logger.info(f"Batch 0: Value targets range [{value_targets_np.min():.3f}, {value_targets_np.max():.3f}], unique values: {unique_targets}")
-                    self.logger.info(f"Batch 0: Value predictions range [{values_np.min():.3f}, {values_np.max():.3f}]")
+                    worker_logger.info(f"Batch 0: Value targets range [{value_targets_np.min():.3f}, {value_targets_np.max():.3f}], unique values: {unique_targets}")
+                    worker_logger.info(f"Batch 0: Value predictions range [{values_np.min():.3f}, {values_np.max():.3f}]")
+                    
+                    # Check for tanh squashing issues
+                    if abs(values_np.max()) < 0.8 and abs(values_np.min()) < 0.8:
+                        worker_logger.warning("⚠️  Value predictions seem squashed - possible double-tanh issue!")
                 
                 # Compute losses separately
                 policy_loss = F.cross_entropy(policy_logits, policy_targets)
                 value_loss = F.mse_loss(values, value_targets)
-                total_loss_batch = policy_loss + value_loss
+                
+                # Weighted loss to emphasize value learning
+                value_weight = 3.0  # Increased from 1.0 to emphasize value learning
+                total_loss_batch = policy_loss + value_weight * value_loss
                 
                 # Backward pass
                 optimizer.zero_grad()
@@ -1178,6 +1071,7 @@ class ParallelTrainer:
                 num_batches += 1
                 
             except Exception as e:
+                worker_logger.warning(f"Error processing batch: {e}")
                 continue  # Skip problematic batches
         
         if num_batches > 0:
@@ -1211,214 +1105,16 @@ class ParallelTrainer:
         
         return checkpoint_path
     
-    def _initialize_training_components(self) -> None:
-        """
-        Initialize all models, optimizers, and schedulers for parallel training.
-        """
-        self.logger.info("Initializing training components for all models...")
-        
-        # Import model creation function
-        from ..core.alphazero_net import AlphaZeroNet
-        
-        for job in self.default_training_jobs:
-            job_id = job['job_id']
-            
-            self.logger.info(f"Initializing {job_id}: {job['filters']} filters, {job['blocks']} blocks")
-            
-            # Create model with job-specific architecture
-            model = AlphaZeroNet(
-                board_size=8,
-                action_size=4672,
-                num_filters=job['filters'],
-                num_res_blocks=job['blocks'],
-                input_channels=119
-            )
-            model.to(self.device)
-            self.models[job_id] = model
-            
-            # Create optimizer
-            optimizer = torch.optim.Adam(
-                model.parameters(),
-                lr=job['initial_learning_rate'],
-                weight_decay=1e-4  # L2 regularization as in AlphaZero
-            )
-            self.optimizers[job_id] = optimizer
-            
-            # Create learning rate scheduler
-            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer,
-                mode='min',
-                factor=job['lr_factor'],
-                patience=job['lr_patience'],
-                threshold=1e-4,
-                min_lr=1e-8
-            )
-            self.schedulers[job_id] = scheduler
-            
-            # Initialize training state
-            self.training_states[job_id] = {
-                'iteration': 0,
-                'total_games': 0,
-                'best_loss': float('inf'),
-                'losses': [],
-                'learning_rates': []
-            }
-            
-            self.logger.info(f"Initialized {job_id} successfully")
-        
-        # Log total model count and estimated memory usage
-        total_params = sum(sum(p.numel() for p in model.parameters()) for model in self.models.values())
-        self.logger.info(f"Initialized {len(self.models)} models with {total_params:,} total parameters")
-        
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()  # Clear any cached memory
-            initial_memory = torch.cuda.memory_allocated() / 1024**3
-            self.logger.info(f"Initial GPU memory usage: {initial_memory:.2f}GB")
-    
-    def _train_model_on_examples(self, job_id: str, training_examples: List[Any]) -> float:
-        """
-        Train a specific model on its training examples.
-        
-        Args:
-            job_id: Identifier for the training job
-            training_examples: List of training examples from self-play
-            
-        Returns:
-            Average training loss for this batch
-        """
-        if not training_examples:
-            return 0.0
-        
-        model = self.models[job_id]
-        optimizer = self.optimizers[job_id]
-        job = next(job for job in self.default_training_jobs if job['job_id'] == job_id)
-        batch_size = job['batch_size']
-        
-        model.train()
-        total_loss = 0.0
-        num_batches = 0
-        
-        # Create batches from training examples
-        for i in range(0, len(training_examples), batch_size):
-            batch = training_examples[i:i + batch_size]
-            
-            # Prepare batch tensors (this will depend on your training example format)
-            # For now, assuming training examples have state_tensor, action_probs, outcome
-            try:
-                states = torch.stack([ex.state_tensor for ex in batch]).to(self.device)
-                
-                # Convert action probabilities to policy targets
-                policy_targets = torch.zeros(len(batch), 4672).to(self.device)
-                for j, ex in enumerate(batch):
-                    for action, prob in ex.action_probs.items():
-                        try:
-                            action_idx = self._action_to_index(action)
-                            if 0 <= action_idx < 4672:
-                                policy_targets[j, action_idx] = prob
-                        except:
-                            continue  # Skip invalid actions
-                
-                # Value targets
-                value_targets = torch.tensor([ex.outcome for ex in batch], 
-                                           dtype=torch.float32).to(self.device)
-                
-                # Forward pass
-                policy_logits, values = model(states)
-                values = values.squeeze()
-                
-                # Compute losses
-                policy_loss = F.cross_entropy(policy_logits, policy_targets)
-                value_loss = F.mse_loss(values, value_targets)
-                total_loss_batch = policy_loss + value_loss
-                
-                # Backward pass
-                optimizer.zero_grad()
-                total_loss_batch.backward()
-                
-                # Gradient clipping (as in AlphaZero)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                
-                optimizer.step()
-                
-                total_loss += total_loss_batch.item()
-                num_batches += 1
-                
-            except Exception as e:
-                self.logger.warning(f"Error processing batch for {job_id}: {e}")
-                continue
-        
-        avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
-        
-        # Update training state
-        self.training_states[job_id]['losses'].append(avg_loss)
-        self.training_states[job_id]['learning_rates'].append(
-            optimizer.param_groups[0]['lr']
-        )
-        
-        return avg_loss
-    
     def _action_to_index(self, action) -> int:
         """
         Convert chess move to action index using ChessPosition implementation.
         """
-        from src.core.game_utils import ChessPosition
+        from ..core.game_utils import ChessPosition
         temp_position = ChessPosition()
         return temp_position.action_to_index(action)
     
-    def _save_checkpoints(self, iteration: int, emergency: bool = False) -> None:
-        """
-        Save model checkpoints and training state.
-        
-        Args:
-            iteration: Current training iteration
-            emergency: Whether this is an emergency save
-        """
-        save_type = "emergency" if emergency else "regular"
-        self.logger.info(f"Saving {save_type} checkpoints at iteration {iteration}")
-        
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        for job in self.default_training_jobs:
-            job_id = job['job_id']
-            
-            # Create checkpoint directory
-            checkpoint_path = self.checkpoint_dir / job_id
-            checkpoint_path.mkdir(exist_ok=True)
-            
-            # Save model state
-            model_file = checkpoint_path / f"{job_id}_iter_{iteration}_{timestamp}.pth"
-            torch.save({
-                'iteration': iteration,
-                'model_state_dict': self.models[job_id].state_dict(),
-                'optimizer_state_dict': self.optimizers[job_id].state_dict(),
-                'scheduler_state_dict': self.schedulers[job_id].state_dict(),
-                'job_config': job,
-                'training_state': self.training_states[job_id],
-                'timestamp': timestamp
-            }, model_file)
-            
-            job['last_checkpoint'] = str(model_file)
-            self.logger.info(f"Saved checkpoint for {job_id}: {model_file}")
-        
-        # Save overall training state
-        training_summary = {
-            'iteration': iteration,
-            'timestamp': timestamp,
-            'training_jobs': self.default_training_jobs,
-            'configs': self.configs,
-            'training_states': self.training_states
-        }
-        
-        summary_file = self.checkpoint_dir / f"training_summary_{iteration}_{timestamp}.json"
-        with open(summary_file, 'w') as f:
-            json.dump(training_summary, f, indent=2, default=str)
-        
-        self.logger.info(f"Saved training summary: {summary_file}")
-    
     def _training_summary(self) -> None:
-        """
-        Print final training summary and statistics.
-        """
+        """Print final training summary and statistics."""
         self.logger.info("=== FINAL TRAINING SUMMARY ===")
         
         for job in self.default_training_jobs:
@@ -1429,7 +1125,6 @@ class ParallelTrainer:
             self.logger.info(f"  Games played: {job['games_played']}")
             self.logger.info(f"  Final loss: {job['current_loss']:.6f}")
             self.logger.info(f"  Best loss: {job['best_loss']:.6f}")
-            self.logger.info(f"  Final LR: {self.optimizers[job_id].param_groups[0]['lr']:.8f}")
             
             if job['last_checkpoint']:
                 self.logger.info(f"  Last checkpoint: {job['last_checkpoint']}")

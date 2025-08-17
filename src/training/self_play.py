@@ -1,8 +1,9 @@
 """
-Style-Specific Self-Play for AlphaZero Training
+Style-Specific Self-Play for AlphaZero Training - DEDUPLICATED VERSION
 
 This module provides self-play game generation with style-specific opening selection
-using the ECO opening database to imprint tactical, positional, or dynamic playing styles.
+using the ECO opening database. All shared utilities have been moved to training_utils.py
+to eliminate duplication.
 
 Author: Francesco Finucci
 """
@@ -40,8 +41,16 @@ except ImportError:
 from ..core.chess_engine import ChessPosition
 from ..core.game_utils import ChessGameState
 from ..core.alphazero_net import AlphaZeroNet
-from ..core.alphazero_mcts import AlphaZeroMCTS, AlphaZeroTrainingExample, generate_self_play_game, tactical_temperature_schedule
+from ..core.alphazero_mcts import AlphaZeroMCTS, AlphaZeroTrainingExample, generate_self_play_game
 from ..data.openings.openings import ECO_OpeningDatabase, OpeningTemplate
+
+# DEDUPLICATED: Import centralized utilities instead of local implementations
+from ..training.training_utils import (
+    TrainingUtilities,
+    TemperatureSchedules, 
+    TrainingExampleFilters,
+    GameOutcomeAnalyzer
+)
 
 
 def save_board_image(board: chess.Board, filepath: str, title: str = "") -> bool:
@@ -114,11 +123,11 @@ class SelfPlayGameResult:
 
 class StyleSpecificSelfPlay:
     """
-    Generates self-play training data with style-specific opening selection.
+    Generates self-play training data with style-specific opening selection - DEDUPLICATED VERSION.
     
     Uses the ECO opening database to force specific playing styles during
     the opening phase, then allows AlphaZero MCTS to take over naturally.
-    This creates training data biased toward tactical, positional, or dynamic styles.
+    All shared utilities have been moved to training_utils.py.
     """
     
     def __init__(self, device: str = 'cuda', logger: logging.Logger = None, 
@@ -143,7 +152,8 @@ class StyleSpecificSelfPlay:
         
         if self.save_board_images:
             os.makedirs(self.board_images_dir, exist_ok=True)
-            self.logger.info(f"Board images will be saved to: {self.board_images_dir}")
+            if logger:
+                logger.info(f"Board images will be saved to: {self.board_images_dir}")
         
         # Setup logging - use provided logger or create own
         if logger is not None:
@@ -165,19 +175,20 @@ class StyleSpecificSelfPlay:
                         f"Positional={len(self.opening_db.get_openings_for_style('positional'))}, "
                         f"Dynamic={len(self.opening_db.get_openings_for_style('dynamic'))}")
     
-    def generate_training_examples(self, model: AlphaZeroNet, style: str, num_games: int,
-                                 mcts_simulations: int = 800, dirichlet_alpha: float = 0.3,
-                                 temperature_moves: int = 30, save_board_images: bool = False,
-                                 board_images_dir: str = "board_images") -> List[AlphaZeroTrainingExample]:
+    def generate_training_examples(self, model, num_games: int, style: str = 'standard', 
+                                 mcts_simulations: int = 100, temperature_moves: int = 30,
+                                 save_board_images: bool = False, board_images_dir: Optional[str] = None,
+                                 dirichlet_alpha: float = 0.3, enable_resignation: bool = True,
+                                 resignation_threshold: float = -0.9, max_moves: int = 150) -> List[AlphaZeroTrainingExample]:
         """
-        Generate training examples through style-specific self-play.
+        Generate training examples through style-specific self-play - DEDUPLICATED VERSION.
         
         Args:
             model: AlphaZero neural network for move evaluation
             style: Target playing style ('tactical', 'positional', 'dynamic')
             num_games: Number of self-play games to generate
             mcts_simulations: Number of MCTS simulations per move
-            dirichlet_alpha: Dirichlet noise parameter for exploration
+            dirichlet_alpha: Dirichlet noise parameter for exploration (now handled centrally)
             temperature_moves: Number of moves to use temperature > 0
             save_board_images: Whether to save starting and ending board positions as images
             board_images_dir: Directory to save board images
@@ -190,13 +201,20 @@ class StyleSpecificSelfPlay:
         
         self.logger.info(f"Generating {num_games} {style} style games with {mcts_simulations} MCTS sims")
         
-        # Create MCTS engine for this model
+        # Create MCTS engine with config parameters for proper resignation handling
         self.logger.info(f"Creating MCTS engine for {style} style games...")
-        mcts_engine = AlphaZeroMCTS(model, c_puct=1.0, device=self.device, logger=self.logger)
+        mcts_engine = AlphaZeroMCTS(
+            model, 
+            c_puct=2.0,  # Increased exploration
+            device=self.device, 
+            resignation_threshold=resignation_threshold,  # Use config parameter
+            logger=self.logger
+        )
         self.logger.info(f"MCTS engine created successfully")
         
         all_training_examples = []
         successful_games = 0
+        decisive_games = 0  # Track games with actual winners
         
         for game_idx in range(num_games):
             try:
@@ -206,17 +224,27 @@ class StyleSpecificSelfPlay:
                     mcts_engine=mcts_engine,
                     style=style,
                     mcts_simulations=mcts_simulations,
-                    dirichlet_alpha=dirichlet_alpha,
                     temperature_moves=temperature_moves,
                     game_id=f"{style}_{game_idx}",
                     save_board_images=save_board_images,
-                    board_images_dir=board_images_dir
+                    board_images_dir=board_images_dir,
+                    dirichlet_alpha=dirichlet_alpha,
+                    enable_resignation=enable_resignation,
+                    max_moves=max_moves
                 )
                 
                 if game_result and game_result.training_examples:
-                    all_training_examples.extend(game_result.training_examples)
+                    # DEDUPLICATED: Use centralized filtering
+                    filtered_examples = TrainingExampleFilters.filter_decisive_games(game_result.training_examples)
+                    
+                    if filtered_examples:
+                        all_training_examples.extend(filtered_examples)
+                        decisive_games += 1
+                        self.logger.info(f"Game {game_idx + 1} completed successfully - DECISIVE game with {len(filtered_examples)} examples, {game_result.game_length} moves")
+                    else:
+                        self.logger.info(f"Game {game_idx + 1} was a draw - filtered out from training data")
+                    
                     successful_games += 1
-                    self.logger.info(f"Game {game_idx + 1} completed successfully - {len(game_result.training_examples)} examples, {game_result.game_length} moves")
                     
                     # Update statistics
                     self.style_stats[style]['games'] += 1
@@ -224,36 +252,44 @@ class StyleSpecificSelfPlay:
                     games_count = self.style_stats[style]['games']
                     new_avg = ((current_avg * (games_count - 1)) + game_result.game_length) / games_count
                     self.style_stats[style]['avg_length'] = new_avg
-                else:
-                    self.logger.warning(f"Game {game_idx + 1} failed to generate valid training examples")
                     
                     if game_result.opening_used:
                         self.openings_used[game_result.opening_used] = self.openings_used.get(game_result.opening_used, 0) + 1
+                else:
+                    self.logger.warning(f"Game {game_idx + 1} failed to generate valid training examples")
                 
             except Exception as e:
                 self.logger.warning(f"Failed to generate game {game_idx} for style {style}: {e}")
+                import traceback
+                self.logger.warning(f"Exception details: {traceback.format_exc()}")
                 continue
         
         self.games_generated += successful_games
         
-        self.logger.info(f"Generated {successful_games}/{num_games} successful {style} games, "
-                        f"{len(all_training_examples)} training examples")
+        # Enhanced logging with decisive game statistics
+        self.logger.info(f"Generated {successful_games}/{num_games} successful {style} games")
+        self.logger.info(f"Decisive games: {decisive_games}/{successful_games} ({decisive_games/max(successful_games,1)*100:.1f}%)")
+        self.logger.info(f"Total training examples: {len(all_training_examples)}")
+        
+        if decisive_games == 0:
+            self.logger.warning("⚠️  NO DECISIVE GAMES GENERATED - All games were draws!")
+            self.logger.warning("Consider adjusting MCTS parameters or resignation thresholds")
         
         return all_training_examples
     
     def _generate_single_game(self, mcts_engine: AlphaZeroMCTS, style: str,
-                             mcts_simulations: int, dirichlet_alpha: float,
-                             temperature_moves: int, game_id: str,
-                             save_board_images: bool = False,
-                             board_images_dir: str = "board_images") -> Optional[SelfPlayGameResult]:
+                             mcts_simulations: int, temperature_moves: int, 
+                             game_id: str, save_board_images: bool = False,
+                             board_images_dir: str = "board_images",
+                             dirichlet_alpha: float = 0.3, enable_resignation: bool = True,
+                             max_moves: int = 150) -> Optional[SelfPlayGameResult]:
         """
-        Generate a single self-play game using the enhanced MCTS implementation.
+        Generate a single self-play game using the enhanced MCTS implementation - DEDUPLICATED VERSION.
         
         Args:
             mcts_engine: MCTS engine for move selection
             style: Target playing style
             mcts_simulations: MCTS simulations per move
-            dirichlet_alpha: Dirichlet noise parameter (not used in new implementation)
             temperature_moves: Moves with temperature > 0
             game_id: Unique identifier for this game
             
@@ -266,26 +302,18 @@ class StyleSpecificSelfPlay:
         # Create initial position from opening
         initial_position = self._create_position_from_opening(opening)
         
-        # Define temperature schedule based on style and parameters
-        def style_temperature_schedule(move_num: int) -> float:
-            """Temperature schedule adapted to style and configuration."""
-            if move_num < temperature_moves:
-                if style == "tactical":
-                    return tactical_temperature_schedule(move_num)
-                else:
-                    return 1.0  # Standard exploration
-            else:
-                return 0.0  # Deterministic play
-        
         try:
-            # Use the enhanced MCTS self-play implementation
+            # DEDUPLICATED: Use centralized self-play generation with style-specific temperature
             training_examples, final_state, move_history, game_resigned, winner = generate_self_play_game(
                 chess_engine=mcts_engine,
                 initial_state=initial_position,
                 num_simulations=mcts_simulations,
-                temperature_schedule=style_temperature_schedule,
-                max_moves=150,
-                enable_resignation=True
+                temperature_schedule=None,  # Will use style-based schedule
+                max_moves=max_moves,  # Use config parameter
+                enable_resignation=enable_resignation,  # Use config parameter
+                filter_draws=False,  # Don't filter here, we'll filter in the calling function
+                style=style,  # Pass style for temperature schedule selection
+                dirichlet_alpha=dirichlet_alpha  # Pass through the alpha parameter
             )
             
             if not training_examples:
@@ -295,7 +323,7 @@ class StyleSpecificSelfPlay:
             # Calculate final reward from the last example
             final_reward = training_examples[-1].outcome if training_examples else 0.0
             
-            # Determine game outcome for logging using the explicit winner
+            # Enhanced outcome logging with resignation info
             if game_resigned:
                 if winner == 1:
                     outcome_str = "White wins by resignation"
@@ -311,7 +339,14 @@ class StyleSpecificSelfPlay:
                 else:
                     outcome_str = "Draw"
             
+            # Log game outcome with additional statistics
+            outcome_distribution = {}
+            for ex in training_examples:
+                outcome_key = "win" if ex.outcome > 0.5 else "loss" if ex.outcome < -0.5 else "draw"
+                outcome_distribution[outcome_key] = outcome_distribution.get(outcome_key, 0) + 1
+            
             self.logger.info(f"Game {game_id}: {outcome_str} after {len(training_examples)} moves")
+            self.logger.info(f"Training examples distribution: {outcome_distribution}")
             
             # Save board images if enabled
             if save_board_images:
@@ -332,7 +367,7 @@ class StyleSpecificSelfPlay:
         except Exception as e:
             self.logger.error(f"Error generating game {game_id}: {e}")
             import traceback
-            traceback.print_exc()
+            self.logger.error(f"Full traceback: {traceback.format_exc()}")
             return None
     
     def _save_game_board_images(self, initial_position: ChessPosition, 
@@ -343,16 +378,6 @@ class StyleSpecificSelfPlay:
                                move_history: List[dict] = None) -> None:
         """
         Save starting and ending board positions as images, plus complete move history as JSON.
-        
-        Args:
-            initial_position: Starting chess position
-            final_state: Final chess game state
-            training_examples: List of training examples from the game
-            game_id: Unique game identifier
-            opening: Opening used (if any)
-            outcome_str: Human-readable game outcome
-            board_images_dir: Directory to save board images
-            move_history: Complete list of moves with FENs
         """
         try:
             # Create a subdirectory for this game
@@ -478,40 +503,6 @@ class StyleSpecificSelfPlay:
         
         return ChessPosition(board)
     
-    def _add_dirichlet_noise(self, action_probs: Dict[chess.Move, float], 
-                            alpha: float) -> Dict[chess.Move, float]:
-        """
-        Add Dirichlet noise to action probabilities for exploration.
-        
-        Args:
-            action_probs: Original action probabilities
-            alpha: Dirichlet distribution parameter
-            
-        Returns:
-            Action probabilities with added noise
-        """
-        if not action_probs or alpha <= 0:
-            return action_probs
-        
-        actions = list(action_probs.keys())
-        probs = list(action_probs.values())
-        
-        try:
-            # Generate Dirichlet noise
-            noise = np.random.dirichlet([alpha] * len(actions))
-            
-            # Mix original probabilities with noise (0.75 original, 0.25 noise)
-            noisy_probs = 0.75 * np.array(probs) + 0.25 * noise
-            
-            # Normalize to ensure probabilities sum to 1
-            noisy_probs = noisy_probs / np.sum(noisy_probs)
-            
-            return {action: prob for action, prob in zip(actions, noisy_probs)}
-            
-        except Exception as e:
-            self.logger.warning(f"Failed to add Dirichlet noise: {e}")
-            return action_probs
-    
     def get_statistics(self) -> Dict[str, Any]:
         """
         Get statistics about generated games and opening usage.
@@ -570,7 +561,10 @@ def validate_style_specific_generation(style: str, num_test_games: int = 5) -> N
         style=style,
         num_games=num_test_games,
         mcts_simulations=100,  # Reduced for testing
-        temperature_moves=10
+        temperature_moves=10,
+        enable_resignation=True,  # Default for testing
+        resignation_threshold=-0.9,  # Default for testing
+        max_moves=120  # Shorter for testing
     )
     
     # Display results

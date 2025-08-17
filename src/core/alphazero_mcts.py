@@ -1,12 +1,8 @@
 """
-AlphaZero Monte Carlo Tree Search Implementation - FIXED VERSION
+AlphaZero Monte Carlo Tree Search Implementation - DEDUPLICATED VERSION
 
-This implementation fixes the critical issues causing 100% draw rate:
-1. Correct reward perspective in terminal states
-2. Proper training example reward assignment
-3. Increased exploration parameters
-4. Better temperature scheduling
-5. Resignation logic to prevent meaningless games
+This version removes all duplicated logic by using centralized training utilities.
+All shared functionality has been moved to training_utils.py.
 
 Based on Silver et al. (2017): "Mastering Chess and Shogi by Self-Play 
 with a General Reinforcement Learning Algorithm"
@@ -19,9 +15,30 @@ import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple, Any
 from pathlib import Path
 import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))  # Ensure src is in path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.core.game_utils import ChessGameState, should_resign_material
+from src.core.game_utils import ChessGameState
+
+# Use lazy imports to avoid circular dependency
+def _get_training_utilities():
+    """Lazy import of training utilities to avoid circular imports."""
+    from src.training.training_utils import TrainingUtilities
+    return TrainingUtilities
+
+def _get_temperature_schedules():
+    """Lazy import of temperature schedules to avoid circular imports."""
+    from src.training.training_utils import TemperatureSchedules
+    return TemperatureSchedules
+
+def _get_resignation_logic():
+    """Lazy import of resignation logic to avoid circular imports."""
+    from src.training.training_utils import ResignationLogic
+    return ResignationLogic
+
+def _get_game_outcome_analyzer():
+    """Lazy import of game outcome analyzer to avoid circular imports."""
+    from src.training.training_utils import GameOutcomeAnalyzer
+    return GameOutcomeAnalyzer
 
 
 class AlphaZeroNode:
@@ -201,13 +218,9 @@ class AlphaZeroNode:
 
 class AlphaZeroMCTS:
     """
-    AlphaZero Monte Carlo Tree Search - FIXED VERSION
+    AlphaZero Monte Carlo Tree Search - DEDUPLICATED VERSION
     
-    Uses neural network for:
-    1. Prior move probabilities (policy)
-    2. Position evaluation (value)
-    
-    No random rollouts - direct neural network evaluation at leaf nodes.
+    Uses centralized utilities from training_utils.py to eliminate duplication.
     """
     
     def __init__(self, neural_network, c_puct: float = 2.0, device: str = 'cpu', 
@@ -257,7 +270,7 @@ class AlphaZeroMCTS:
     
     def _simulate(self, root: AlphaZeroNode) -> None:
         """
-        Single MCTS simulation - FIXED VERSION:
+        Single MCTS simulation:
         1. Selection: Navigate tree using PUCT
         2. Expansion: Expand leaf node with neural network
         3. Backup: Propagate value up the tree
@@ -273,17 +286,9 @@ class AlphaZeroMCTS:
         
         # Phase 2: Expansion & Evaluation
         if current.state.is_terminal():
-            # CRITICAL FIX: Terminal reward from correct perspective
-            # get_reward() returns reward for player whose turn it is
-            # But in terminal state, the game is over, so we need the reward
-            # from perspective of the player who would move (but can't)
+            # Terminal reward from correct perspective
             raw_reward = current.state.get_reward()
-            
-            # Since the game is terminal, the player to move has lost their turn
-            # The reward should be from their perspective
-            # If the game ended in their favor, they get +1, otherwise -1
             value = raw_reward  # Use the reward as-is since get_reward() should handle perspective
-            
         else:
             if current.is_leaf():
                 # Expand leaf node with neural network
@@ -292,7 +297,6 @@ class AlphaZeroMCTS:
             value = current.neural_value
         
         # Phase 3: Backup - propagate value up tree
-        # Value is from perspective of current player at current node
         current_value = value
         
         # Backup through path (alternating perspective)
@@ -319,6 +323,8 @@ class AlphaZeroMCTS:
         
         # Convert outputs
         policy_probs = F.softmax(policy_logits, dim=-1).squeeze(0)  # Remove batch dim
+        
+        # Apply tanh since it was removed from neural network forward()
         value = torch.tanh(value).item()  # Scalar value in [-1, 1]
         
         # Get legal actions
@@ -329,8 +335,7 @@ class AlphaZeroMCTS:
     
     def should_resign(self, value: float, move_count: int, current_state: ChessGameState = None) -> bool:
         """
-        Determine if the position is hopeless and should resign.
-        This prevents long, meaningless games.
+        DEDUPLICATED: Use centralized resignation logic.
         
         Args:
             value: Current position evaluation
@@ -340,47 +345,24 @@ class AlphaZeroMCTS:
         Returns:
             True if should resign, False otherwise
         """
-        # Only consider resignation after opening
-        if move_count < 20:
-            return False
+        resignation_logic = _get_resignation_logic()
+        should_resign, reason = resignation_logic.should_resign_combined(
+            value=value,
+            board=current_state.board if current_state else None,
+            move_count=move_count,
+            eval_threshold=self.resignation_threshold,
+            material_threshold=300,
+            min_moves=20
+        )
         
-        # Resign if position is completely lost according to neural network
-        nn_should_resign = value < self.resignation_threshold
-        if nn_should_resign:
-            msg = f"Neural network resignation triggered for {'white' if current_state.board.turn else 'black'} at move {move_count}"
-            details = f"Value: {value}, Threshold: {self.resignation_threshold}"
-            fen = f"FEN: {current_state.board.fen()}"
-            
-            if self.logger:
-                self.logger.info(f"RESIGNATION: {msg}")
-                self.logger.info(f"RESIGNATION: {details}")
-                self.logger.info(f"RESIGNATION: {fen}")
-            else:
-                print(msg)
-                print(details)
-                print(fen)
-            return nn_should_resign
+        if should_resign and self.logger:
+            player = 'white' if current_state and current_state.board.turn else 'black'
+            self.logger.info(f"RESIGNATION: {player} resigns at move {move_count} (reason: {reason})")
+            if current_state:
+                self.logger.info(f"RESIGNATION: FEN: {current_state.board.fen()}")
+        
+        return should_resign
     
-        # Check for obvious material imbalance first (fallback for poorly trained networks)
-        if current_state:
-            # Use the proper material evaluation from game_utils
-            material_should_resign = should_resign_material(current_state.board, threshold_centipawns=500)  # Reduced from 800 to 500
-            if material_should_resign:
-                msg = f"Material resignation triggered for {'white' if current_state.board.turn else 'black'} at move {move_count}"
-                fen = f"FEN: {current_state.board.fen()}"
-                
-                if self.logger:
-                    self.logger.info(f"RESIGNATION: {msg}")
-                    self.logger.info(f"RESIGNATION: {fen}")
-                else:
-                    print(msg)
-                    print(fen)
-                return True
-        elif hasattr(self, 'current_board_state') and self.current_board_state:
-            if should_resign_material(self.current_board_state.board, threshold_centipawns=500):
-                return True
-            
-
     def get_best_action(self, root_state: ChessGameState, 
                        num_simulations: int = 800) -> Any:
         """
@@ -401,7 +383,9 @@ class AlphaZeroMCTS:
     
     def get_action_probabilities(self, root_state: ChessGameState,
                                 num_simulations: int = 800,
-                                temperature: float = 1.0) -> Dict[Any, float]:
+                                temperature: float = 1.0,
+                                add_noise: bool = False,
+                                dirichlet_alpha: float = 0.3) -> Dict[Any, float]:
         """
         Get action probabilities using MCTS search.
         
@@ -409,6 +393,8 @@ class AlphaZeroMCTS:
             root_state: Chess position to analyze
             num_simulations: Number of MCTS simulations
             temperature: Temperature for probability calculation
+            add_noise: Whether to add Dirichlet noise for exploration (training only)
+            dirichlet_alpha: Dirichlet concentration parameter for noise
             
         Returns:
             Dictionary mapping actions to probabilities
@@ -417,7 +403,14 @@ class AlphaZeroMCTS:
             return {}
         
         root = self.search(root_state, num_simulations)
-        return root.get_action_probabilities(temperature)
+        action_probs = root.get_action_probabilities(temperature)
+        
+        # DEDUPLICATED: Use centralized Dirichlet noise with configurable alpha
+        if add_noise and action_probs:
+            training_utils = _get_training_utilities()
+            action_probs = training_utils.add_dirichlet_noise(action_probs, alpha=dirichlet_alpha)
+        
+        return action_probs
     
     def get_principal_variation(self, root_state: ChessGameState,
                                num_simulations: int = 800,
@@ -463,48 +456,37 @@ class AlphaZeroTrainingExample:
         self.current_player = current_player
 
 
-def tactical_temperature_schedule(move_num: int) -> float:
-    """
-    Temperature schedule optimized for tactical play.
-    More exploration in tactical phases.
-    
-    Args:
-        move_num: Current move number (0-indexed)
-        
-    Returns:
-        Temperature value for this move
-    """
-    if move_num < 10:
-        return 1.5    # High exploration in opening
-    elif move_num < 40:
-        return 1.0    # Standard exploration in middlegame  
-    elif move_num < 60:
-        return 0.5    # Reduced exploration in complex positions
-    else:
-        return 0.1    # Near-deterministic in endgame
-
-
 def generate_self_play_game(chess_engine: AlphaZeroMCTS, initial_state: ChessGameState,
                            num_simulations: int = 800,
-                           temperature_schedule: callable = tactical_temperature_schedule,
+                           temperature_schedule: callable = None,
                            max_moves: int = 150,
-                           enable_resignation: bool = True
+                           enable_resignation: bool = True,
+                           filter_draws: bool = True,
+                           style: str = 'standard',
+                           dirichlet_alpha: float = 0.3
                            ) -> tuple[List[AlphaZeroTrainingExample], ChessGameState, List[dict], bool, Optional[int]]:
     """
-    Generate a complete self-play game for training - FIXED VERSION.
+    Generate a complete self-play game for training - DEDUPLICATED VERSION.
     
     Args:
         chess_engine: AlphaZeroMCTS instance
         initial_state: Starting chess position
         num_simulations: MCTS simulations per move
-        temperature_schedule: Function mapping move number to temperature
+        temperature_schedule: Function mapping move number to temperature (if None, uses style-based schedule)
         max_moves: Maximum moves before declaring draw
         enable_resignation: Whether to allow resignation in hopeless positions
+        filter_draws: Whether to filter out drawn games from training data
+        style: Playing style for temperature schedule ('tactical', 'positional', 'dynamic', 'standard')
+        dirichlet_alpha: Dirichlet concentration parameter for exploration noise
         
     Returns:
         Tuple of (training_examples, final_state, move_history, game_resigned, winner)
-        winner: 1 for white wins, -1 for black wins, 0 for draw, None if game incomplete
     """
+    # DEDUPLICATED: Use centralized temperature schedule
+    if temperature_schedule is None:
+        temp_schedules = _get_temperature_schedules()
+        temperature_schedule = temp_schedules.get_schedule_for_style(style)
+    
     training_examples = []
     current_state = initial_state.clone()
     move_count = 0
@@ -525,8 +507,13 @@ def generate_self_play_game(chess_engine: AlphaZeroMCTS, initial_state: ChessGam
     while not current_state.is_terminal() and move_count < max_moves and not game_resigned:
         # Get MCTS action probabilities
         temperature = temperature_schedule(move_count)
+        
+        # Add noise during training for better exploration
+        add_noise = move_count < 30  # Add noise for first 30 moves
         action_probs = chess_engine.get_action_probabilities(
-            current_state, num_simulations=num_simulations, temperature=temperature
+            current_state, num_simulations=num_simulations, 
+            temperature=temperature, add_noise=add_noise,
+            dirichlet_alpha=dirichlet_alpha  # Pass through the alpha parameter
         )
         
         # Check for resignation (only after getting action probabilities to get value estimate)
@@ -553,28 +540,13 @@ def generate_self_play_game(chess_engine: AlphaZeroMCTS, initial_state: ChessGam
         )
         training_examples.append(example)
         
-        # Sample action from MCTS probabilities
-        actions = list(action_probs.keys())
-        probabilities = list(action_probs.values())
+        # DEDUPLICATED: Use centralized action sampling
+        training_utils = _get_training_utilities()
+        action = training_utils.sample_action_from_probabilities(action_probs, temperature)
         
-        if not actions:
+        if action is None:
             # No legal moves - this shouldn't happen but handle gracefully
             break
-            
-        if temperature == 0.0 or len(actions) == 1:
-            # Deterministic: choose best action
-            action = max(action_probs.keys(), key=lambda a: action_probs[a])
-        else:
-            # Stochastic: sample from distribution
-            if sum(probabilities) > 0:
-                # Normalize probabilities to ensure they sum to 1
-                prob_tensor = torch.tensor(probabilities)
-                prob_tensor = prob_tensor / prob_tensor.sum()
-                action_idx = torch.multinomial(prob_tensor, 1).item()
-                action = actions[action_idx]
-            else:
-                # Fallback if all probabilities are zero
-                action = actions[0]
                 
         # Apply action and record move
         move_san = current_state.board.san(action)  # Get SAN notation before applying move
@@ -590,44 +562,32 @@ def generate_self_play_game(chess_engine: AlphaZeroMCTS, initial_state: ChessGam
             "player": "black" if current_state.get_current_player() == 1 else "white"  # Player who just moved
         })
     
-    # CRITICAL FIX: Proper game outcome assignment
+    # DEDUPLICATED: Use centralized game outcome analysis
+    game_analyzer = _get_game_outcome_analyzer()
     if game_resigned:
-        # Handle resignation - resigning_player was determined when resignation occurred
-        for example in training_examples:
-            if example.current_player == resigning_player:
-                example.outcome = -1.0  # Resigning player loses
-            else:
-                example.outcome = 1.0   # Opponent wins
-                
+        game_result = game_analyzer.create_resignation_result(
+            resigning_player, move_count, current_state.board.fen()
+        )
     elif current_state.is_terminal():
-        # Game ended naturally - use actual result
-        final_outcome = current_state.get_reward()
-        
-        # The current_player at terminal state is the player who would move next
-        # but the game is over. We need to assign outcomes correctly.
-        terminal_player_to_move = current_state.get_current_player()
-        
-        # Determine winner based on the terminal reward
-        if final_outcome > 0:
-            winner = terminal_player_to_move
-        elif final_outcome < 0:
-            winner = -terminal_player_to_move
-        else:
-            winner = 0  # Draw
-        
-        for example in training_examples:
-            if example.current_player == terminal_player_to_move:
-                # This player's turn when game ended - they get the terminal reward
-                example.outcome = final_outcome
-            else:
-                # Opponent gets opposite reward
-                example.outcome = -final_outcome
-                
+        game_result = game_analyzer.analyze_terminal_position(current_state.board)
     else:
         # Game hit move limit - declare draw
-        print(f"Game reached move limit ({max_moves}) - declaring draw")
-        winner = 0  # Draw
-        for example in training_examples:
-            example.outcome = 0.0  # Draw for all positions
+        from src.training.training_utils import GameResult
+        game_result = GameResult(
+            winner=0,
+            outcome_type="move_limit",
+            move_count=move_count,
+            final_fen=current_state.board.fen()
+        )
+    
+    # DEDUPLICATED: Use centralized outcome assignment
+    game_analyzer = _get_game_outcome_analyzer()
+    game_analyzer.assign_training_outcomes(training_examples, game_result)
+    winner = game_result.winner
+    
+    # DEDUPLICATED: Use centralized filtering
+    if filter_draws:
+        from src.training.training_utils import TrainingExampleFilters
+        training_examples = TrainingExampleFilters.filter_decisive_games(training_examples)
     
     return training_examples, current_state, move_history, game_resigned, winner

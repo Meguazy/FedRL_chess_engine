@@ -1,5 +1,5 @@
 """
-AlphaZero Neural Network Architecture
+AlphaZero Neural Network Architecture - FIXED VERSION
 
 This module defines the neural network architecture used in AlphaZero.
 
@@ -123,11 +123,7 @@ class AlphaZeroNet(nn.Module):
         value = value.view(batch_size, -1)  # Flatten
         value = F.relu(self.value_fc1(value))
         value = self.value_fc2(value)
-        # Apply tanh activation to value output that ranges from -1 to 1
-        # This is common in AlphaZero architectures to normalize the value output
-        # -1 means a loss, 1 means a win and 0 means a draw
-        value = torch.tanh(value)
-
+        
         return policy_logits, value
     
     def predict(self, x):
@@ -146,6 +142,9 @@ class AlphaZeroNet(nn.Module):
         with torch.no_grad():
             policy_logits, value = self.forward(x)
             policy_probs = F.softmax(policy_logits, dim=-1)  # Convert logits to probabilities
+            
+            # MODIFICATION HERE: Apply tanh here for prediction consistency
+            value = torch.tanh(value)
         return policy_probs, value
     
 def create_alphazero_chess_net() -> AlphaZeroNet:

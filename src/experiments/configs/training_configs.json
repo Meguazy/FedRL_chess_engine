@@ -26,9 +26,9 @@
     "dirichlet_alpha": 0.3,
     "temperature_moves": 25,
     "c_puct": 2.0,
-    "max_moves": 150,
+    "max_moves": 60,
     "enable_resignation": true,
-    "resignation_threshold": -0.9,
+    "resignation_threshold": -0.7,
     "description": "Very fast training for initial testing and debugging, with MCTS fixes"
   },
   "prototype": {

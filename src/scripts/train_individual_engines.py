@@ -158,11 +158,10 @@ def create_job_config(args) -> dict:
     
     # Apply enhanced training parameters (always enabled now)
     training_config.update({
-        "c_puct": 2.0,                    # Increased exploration (built into new MCTS)
-        "max_moves": 150,                 # Extended game length
-        "temperature_moves": 40,          # Extended exploration phase
-        "enable_resignation": True,       # Enable resignation
-        "resignation_threshold": -0.9,    # Resignation threshold
+        "c_puct": training_config.get("c_puct", 2.0),  # Use config value or default
+        "max_moves": training_config.get("max_moves", 150),  # Use config value or default  
+        "temperature_moves": training_config.get("temperature_moves", 40),  # Use config value or default
+        # Keep enable_resignation and resignation_threshold from config (don't override)
         "debug_outcomes": args.debug_outcomes,
         # Additional parameters for improved training
         "early_termination_prob": 0.05,  # 5% chance of early termination for diversity
