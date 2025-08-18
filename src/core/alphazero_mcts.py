@@ -352,7 +352,7 @@ class AlphaZeroMCTS:
             move_count=move_count,
             eval_threshold=self.resignation_threshold,
             material_threshold=300,
-            min_moves=20
+            min_moves=25
         )
         
         if should_resign and self.logger:

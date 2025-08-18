@@ -232,20 +232,19 @@ class StyleSpecificSelfPlay:
                     enable_resignation=enable_resignation,
                     max_moves=max_moves
                 )
-                
+
                 if game_result and game_result.training_examples:
                     # DEDUPLICATED: Use centralized filtering
                     filtered_examples = TrainingExampleFilters.filter_decisive_games(game_result.training_examples)
                     
                     if filtered_examples:
-                        all_training_examples.extend(filtered_examples)
                         decisive_games += 1
-                        self.logger.info(f"Game {game_idx + 1} completed successfully - DECISIVE game with {len(filtered_examples)} examples, {game_result.game_length} moves")
+                        self.logger.info(f"Game {game_idx + 1} was a DECISIVE game with {len(filtered_examples)} examples, {game_result.game_length} moves")
                     else:
-                        self.logger.info(f"Game {game_idx + 1} was a draw - filtered out from training data")
+                        self.logger.info(f"Game {game_idx + 1} was a draw")
                     
                     successful_games += 1
-                    
+                    all_training_examples.extend(game_result.training_examples)
                     # Update statistics
                     self.style_stats[style]['games'] += 1
                     current_avg = self.style_stats[style]['avg_length']
