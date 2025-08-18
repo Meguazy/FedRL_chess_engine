@@ -90,6 +90,7 @@ class StyleSpecificSelfPlay:
         mcts_simulations = config.get('mcts_simulations', 100)
         resignation_threshold = config.get('resignation_threshold', -0.9)
         resignation_centipawns = config.get('resignation_centipawns', -700)
+        batch_size = config.get('batch_size', 128)  # Use batch size from config
         c_puct = config.get('c_puct', 2.0)
         
         self.logger.info(f"Generating {num_games} {style} style games with {mcts_simulations} MCTS sims")
@@ -100,7 +101,8 @@ class StyleSpecificSelfPlay:
             model=model,
             resignation_threshold=resignation_threshold,
             resignation_centipawns=resignation_centipawns,
-            c_puct=c_puct
+            c_puct=c_puct,
+            batch_size=batch_size
         )
         
         all_training_examples = []
@@ -205,7 +207,7 @@ class StyleSpecificSelfPlay:
         
         return filtered_examples
 
-    def _create_mcts_engine(self, model, resignation_threshold: float, c_puct: float = 2.0, resignation_centipawns: int = -500) -> AlphaZeroMCTS:
+    def _create_mcts_engine(self, model, resignation_threshold: float, c_puct: float = 2.0, resignation_centipawns: int = -500, batch_size=128) -> AlphaZeroMCTS:
         """Create MCTS engine with proper configuration."""
         return AlphaZeroMCTS(
             model, 
@@ -213,6 +215,8 @@ class StyleSpecificSelfPlay:
             device=self.device, 
             resignation_threshold=resignation_threshold,
             resignation_centipawns=resignation_centipawns,
+            batch_size=batch_size,
+            use_mixed_precision=True,  # Use mixed precision for performance
             logger=self.logger
         )
     
