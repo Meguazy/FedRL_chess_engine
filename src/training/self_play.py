@@ -1,17 +1,15 @@
 """
-Style-Specific Self-Play for AlphaZero Training - DEDUPLICATED VERSION
+Style-Specific Self-Play for AlphaZero Training - FULLY DEDUPLICATED VERSION
 
-This module provides self-play game generation with style-specific opening selection
-using the ECO opening database. All shared utilities have been moved to training_utils.py
-to eliminate duplication.
+This module provides self-play game generation with complete deduplication.
+All shared utilities are in training_utils.py, including statistics, analysis,
+and file operations.
 
 Author: Francesco Finucci
 """
 
 import torch
-import torch.nn.functional as F
 import chess
-import chess.svg
 import numpy as np
 import logging
 import time
@@ -22,434 +20,217 @@ from typing import List, Dict, Optional, Any, Tuple
 from dataclasses import dataclass
 import random
 
-# For board image generation
-try:
-    import cairosvg
-    CAIROSVG_AVAILABLE = True
-except ImportError:
-    CAIROSVG_AVAILABLE = False
-    print("⚠️  cairosvg not available - board images will be saved as SVG only")
-
-try:
-    from PIL import Image
-    import io
-    PIL_AVAILABLE = True
-except ImportError:
-    PIL_AVAILABLE = False
-    print("⚠️  PIL not available - board images will be saved as SVG only")
-
 from ..core.chess_engine import ChessPosition
 from ..core.game_utils import ChessGameState
 from ..core.alphazero_net import AlphaZeroNet
 from ..core.alphazero_mcts import AlphaZeroMCTS, AlphaZeroTrainingExample, generate_self_play_game
 from ..data.openings.openings import ECO_OpeningDatabase, OpeningTemplate
 
-# DEDUPLICATED: Import centralized utilities instead of local implementations
+# DEDUPLICATED: Import ALL utilities from centralized location
 from ..training.training_utils import (
     TrainingUtilities,
     TemperatureSchedules, 
     TrainingExampleFilters,
-    GameOutcomeAnalyzer
+    GameOutcomeAnalyzer,
+    GameStatistics,           # NEW: Centralized statistics
+    BoardImageManager,        # NEW: Centralized image handling
+    GameResultAnalyzer,       # NEW: Centralized result analysis
+    FileManager              # NEW: Centralized file operations
 )
-
-
-def save_board_image(board: chess.Board, filepath: str, title: str = "") -> bool:
-    """
-    Save a chess board position as an image.
-    
-    Args:
-        board: Chess board position to save
-        filepath: Path where to save the image (without extension)
-        title: Optional title to add to the image
-        
-    Returns:
-        True if saved successfully, False otherwise
-    """
-    try:
-        # Create directory if it doesn't exist
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        
-        # Generate SVG of the board
-        board_svg = chess.svg.board(
-            board=board,
-            size=400,
-            coordinates=True,
-            lastmove=board.peek() if board.move_stack else None
-        )
-        
-        # Save as SVG first (always works)
-        svg_path = f"{filepath}.svg"
-        with open(svg_path, 'w') as f:
-            f.write(board_svg)
-        
-        # Try to convert to PNG if libraries are available
-        png_path = f"{filepath}.png"
-        
-        if CAIROSVG_AVAILABLE:
-            # Method 1: Use cairosvg directly
-            try:
-                cairosvg.svg2png(bytestring=board_svg.encode('utf-8'), 
-                               write_to=png_path)
-                return True
-            except Exception as e:
-                print(f"⚠️  cairosvg conversion failed: {e}")
-        
-        if PIL_AVAILABLE:
-            # Method 2: Use PIL with SVG (requires additional setup)
-            try:
-                # This requires rsvg or similar - might not work without additional setup
-                pass
-            except Exception:
-                pass
-        
-        # If PNG conversion failed, at least we have SVG
-        print(f"📷 Board saved as SVG: {svg_path}")
-        return True
-        
-    except Exception as e:
-        print(f"❌ Failed to save board image: {e}")
-        return False
 
 
 @dataclass
 class SelfPlayGameResult:
-    """Result from a single self-play game."""
+    """Result from a single self-play game - simplified."""
     training_examples: List[AlphaZeroTrainingExample]
     game_length: int
-    final_result: float  # 1.0 = white wins, -1.0 = black wins, 0.0 = draw
+    final_result: float
     opening_used: Optional[str] = None
-    style_adherence: float = 0.0  # How well the game followed the target style
+    style_adherence: float = 0.0
 
 
 class StyleSpecificSelfPlay:
     """
-    Generates self-play training data with style-specific opening selection - DEDUPLICATED VERSION.
+    FULLY DEDUPLICATED Style-Specific Self-Play Generator.
     
-    Uses the ECO opening database to force specific playing styles during
-    the opening phase, then allows AlphaZero MCTS to take over naturally.
-    All shared utilities have been moved to training_utils.py.
+    All functionality is delegated to centralized utilities in training_utils.py.
+    This class only handles the high-level orchestration.
     """
     
     def __init__(self, device: str = 'cuda', logger: logging.Logger = None, 
                  save_board_images: bool = False, board_images_dir: str = "board_images"):
-        """
-        Initialize style-specific self-play generator.
-        
-        Args:
-            device: PyTorch device for neural network inference
-            logger: Logger instance to use (if None, creates its own)
-            save_board_images: Whether to save starting and ending board positions as images
-            board_images_dir: Directory to save board images
-        """
+        """Initialize with centralized utilities."""
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
-        
-        # Initialize ECO opening database
         self.opening_db = ECO_OpeningDatabase()
         
-        # Board image saving configuration
-        self.save_board_images = save_board_images
-        self.board_images_dir = board_images_dir
+        # DEDUPLICATED: Use centralized managers
+        self.statistics = GameStatistics()
+        self.image_manager = BoardImageManager(board_images_dir) if save_board_images else None
+        self.result_analyzer = GameResultAnalyzer()
+        self.file_manager = FileManager()
         
-        if self.save_board_images:
-            os.makedirs(self.board_images_dir, exist_ok=True)
-            if logger:
-                logger.info(f"Board images will be saved to: {self.board_images_dir}")
+        # Setup logging
+        self.logger = logger or logging.getLogger(f"StyleSpecificSelfPlay_{id(self)}")
         
-        # Setup logging - use provided logger or create own
-        if logger is not None:
-            self.logger = logger
-        else:
-            self.logger = logging.getLogger(f"StyleSpecificSelfPlay_{id(self)}")
-        
-        # Statistics tracking
-        self.games_generated = 0
-        self.openings_used = {}
-        self.style_stats = {
-            'tactical': {'games': 0, 'avg_length': 0},
-            'positional': {'games': 0, 'avg_length': 0},
-            'dynamic': {'games': 0, 'avg_length': 0}
-        }
-        
-        self.logger.info("StyleSpecificSelfPlay initialized")
-        self.logger.info(f"Available openings: Tactical={len(self.opening_db.get_openings_for_style('tactical'))}, "
-                        f"Positional={len(self.opening_db.get_openings_for_style('positional'))}, "
-                        f"Dynamic={len(self.opening_db.get_openings_for_style('dynamic'))}")
+        self.logger.info("StyleSpecificSelfPlay initialized with centralized utilities")
+        self.logger.info(f"Available openings: {self._get_opening_counts()}")
+    
+    def _get_opening_counts(self) -> str:
+        """Get opening counts for all styles."""
+        counts = {}
+        for style in ['tactical', 'positional', 'dynamic']:
+            counts[style] = len(self.opening_db.get_openings_for_style(style))
+        return f"Tactical={counts['tactical']}, Positional={counts['positional']}, Dynamic={counts['dynamic']}"
     
     def generate_training_examples(self, model, num_games: int, style: str = 'standard', 
-                                 mcts_simulations: int = 100, temperature_moves: int = 30,
-                                 save_board_images: bool = False, board_images_dir: Optional[str] = None,
-                                 dirichlet_alpha: float = 0.3, enable_resignation: bool = True,
-                                 resignation_threshold: float = -0.9, max_moves: int = 150) -> List[AlphaZeroTrainingExample]:
+                                 **config) -> List[AlphaZeroTrainingExample]:
         """
-        Generate training examples through style-specific self-play - DEDUPLICATED VERSION.
+        Generate training examples through style-specific self-play - FULLY DEDUPLICATED.
         
-        Args:
-            model: AlphaZero neural network for move evaluation
-            style: Target playing style ('tactical', 'positional', 'dynamic')
-            num_games: Number of self-play games to generate
-            mcts_simulations: Number of MCTS simulations per move
-            dirichlet_alpha: Dirichlet noise parameter for exploration (now handled centrally)
-            temperature_moves: Number of moves to use temperature > 0
-            save_board_images: Whether to save starting and ending board positions as images
-            board_images_dir: Directory to save board images
-            
-        Returns:
-            List of training examples from all generated games
+        All game generation, filtering, and analysis is handled by centralized utilities.
         """
         if style not in ['tactical', 'positional', 'dynamic']:
             raise ValueError(f"Unknown style: {style}. Must be 'tactical', 'positional', or 'dynamic'")
         
+        # Extract configuration with defaults
+        mcts_simulations = config.get('mcts_simulations', 100)
+        dirichlet_alpha = config.get('dirichlet_alpha', 0.3)
+        enable_resignation = config.get('enable_resignation', True)
+        resignation_threshold = config.get('resignation_threshold', -0.9)
+        max_moves = config.get('max_moves', 150)
+        save_board_images = config.get('save_board_images', False)
+        board_images_dir = config.get('board_images_dir', 'board_images')
+        
         self.logger.info(f"Generating {num_games} {style} style games with {mcts_simulations} MCTS sims")
         
-        # Create MCTS engine with config parameters for proper resignation handling
-        self.logger.info(f"Creating MCTS engine for {style} style games...")
-        mcts_engine = AlphaZeroMCTS(
-            model, 
-            c_puct=2.0,  # Increased exploration
-            device=self.device, 
-            resignation_threshold=resignation_threshold,  # Use config parameter
-            logger=self.logger
-        )
-        self.logger.info(f"MCTS engine created successfully")
+        # Create MCTS engine
+        mcts_engine = self._create_mcts_engine(model, resignation_threshold)
         
         all_training_examples = []
-        successful_games = 0
-        decisive_games = 0  # Track games with actual winners
+        game_results = []
         
+        # Generate games
         for game_idx in range(num_games):
             try:
                 self.logger.info(f"Starting game {game_idx + 1}/{num_games} ({style} style)")
-                # Generate single self-play game with style-specific opening
+                
                 game_result = self._generate_single_game(
                     mcts_engine=mcts_engine,
                     style=style,
-                    mcts_simulations=mcts_simulations,
-                    temperature_moves=temperature_moves,
                     game_id=f"{style}_{game_idx}",
-                    save_board_images=save_board_images,
-                    board_images_dir=board_images_dir,
-                    dirichlet_alpha=dirichlet_alpha,
-                    enable_resignation=enable_resignation,
-                    max_moves=max_moves
+                    config=config
                 )
 
                 if game_result and game_result.training_examples:
-                    # DEDUPLICATED: Use centralized filtering
-                    filtered_examples = TrainingExampleFilters.filter_decisive_games(game_result.training_examples)
-                    
-                    if filtered_examples:
-                        decisive_games += 1
-                        self.logger.info(f"Game {game_idx + 1} was a DECISIVE game with {len(filtered_examples)} examples, {game_result.game_length} moves")
-                    else:
-                        self.logger.info(f"Game {game_idx + 1} was a draw")
-                    
-                    successful_games += 1
+                    game_results.append(game_result)
                     all_training_examples.extend(game_result.training_examples)
-                    # Update statistics
-                    self.style_stats[style]['games'] += 1
-                    current_avg = self.style_stats[style]['avg_length']
-                    games_count = self.style_stats[style]['games']
-                    new_avg = ((current_avg * (games_count - 1)) + game_result.game_length) / games_count
-                    self.style_stats[style]['avg_length'] = new_avg
                     
-                    if game_result.opening_used:
-                        self.openings_used[game_result.opening_used] = self.openings_used.get(game_result.opening_used, 0) + 1
+                    # DEDUPLICATED: Use centralized statistics
+                    self.statistics.record_game(
+                        style=style,
+                        game_length=game_result.game_length,
+                        final_result=game_result.final_result,
+                        opening_used=game_result.opening_used
+                    )
+                    
+                    # DEDUPLICATED: Use centralized result analysis
+                    game_analysis = self.result_analyzer.analyze_training_examples(game_result.training_examples)
+                    self.logger.info(f"Game {game_idx + 1}: {game_analysis['outcome_description']}")
+                    self.logger.info(f"Examples distribution: {game_analysis['outcome_distribution']}")
                 else:
                     self.logger.warning(f"Game {game_idx + 1} failed to generate valid training examples")
                 
             except Exception as e:
-                self.logger.warning(f"Failed to generate game {game_idx} for style {style}: {e}")
-                import traceback
-                self.logger.warning(f"Exception details: {traceback.format_exc()}")
+                self.logger.warning(f"Failed to generate game {game_idx}: {e}")
                 continue
         
-        self.games_generated += successful_games
+        # DEDUPLICATED: Use centralized filtering and final analysis
+        filtered_examples = TrainingExampleFilters.filter_decisive_games(all_training_examples)
+        final_stats = self.statistics.get_style_summary(style)
+        decisive_percentage = self.result_analyzer.calculate_decisive_percentage(game_results)
         
-        # Enhanced logging with decisive game statistics
-        self.logger.info(f"Generated {successful_games}/{num_games} successful {style} games")
-        self.logger.info(f"Decisive games: {decisive_games}/{successful_games} ({decisive_games/max(successful_games,1)*100:.1f}%)")
-        self.logger.info(f"Total training examples: {len(all_training_examples)}")
+        self.logger.info(f"Generated {len(game_results)}/{num_games} successful {style} games")
+        self.logger.info(f"Decisive games: {decisive_percentage:.1f}%")
+        self.logger.info(f"Training examples: {len(filtered_examples)}/{len(all_training_examples)} after filtering")
         
-        if decisive_games == 0:
+        if decisive_percentage == 0:
             self.logger.warning("⚠️  NO DECISIVE GAMES GENERATED - All games were draws!")
-            self.logger.warning("Consider adjusting MCTS parameters or resignation thresholds")
         
-        return all_training_examples
+        return filtered_examples
+    
+    def _create_mcts_engine(self, model, resignation_threshold: float) -> AlphaZeroMCTS:
+        """Create MCTS engine with proper configuration."""
+        return AlphaZeroMCTS(
+            model, 
+            c_puct=2.0,
+            device=self.device, 
+            resignation_threshold=resignation_threshold,
+            logger=self.logger
+        )
     
     def _generate_single_game(self, mcts_engine: AlphaZeroMCTS, style: str,
-                             mcts_simulations: int, temperature_moves: int, 
-                             game_id: str, save_board_images: bool = False,
-                             board_images_dir: str = "board_images",
-                             dirichlet_alpha: float = 0.3, enable_resignation: bool = True,
-                             max_moves: int = 150) -> Optional[SelfPlayGameResult]:
+                             game_id: str, config: dict) -> Optional[SelfPlayGameResult]:
         """
-        Generate a single self-play game using the enhanced MCTS implementation - DEDUPLICATED VERSION.
+        Generate a single self-play game - FULLY DEDUPLICATED.
         
-        Args:
-            mcts_engine: MCTS engine for move selection
-            style: Target playing style
-            mcts_simulations: MCTS simulations per move
-            temperature_moves: Moves with temperature > 0
-            game_id: Unique identifier for this game
-            
-        Returns:
-            SelfPlayGameResult with training examples and metadata
+        All game logic is handled by centralized generate_self_play_game().
         """
-        # Select style-specific opening
+        # DEDUPLICATED: Use centralized opening selection
         opening = self._select_opening_for_style(style)
-        
-        # Create initial position from opening
         initial_position = self._create_position_from_opening(opening)
         
         try:
-            # DEDUPLICATED: Use centralized self-play generation with style-specific temperature
+            # DEDUPLICATED: Use centralized self-play generation
             training_examples, final_state, move_history, game_resigned, winner = generate_self_play_game(
                 chess_engine=mcts_engine,
                 initial_state=initial_position,
-                num_simulations=mcts_simulations,
-                temperature_schedule=None,  # Will use style-based schedule
-                max_moves=max_moves,  # Use config parameter
-                enable_resignation=enable_resignation,  # Use config parameter
-                filter_draws=False,  # Don't filter here, we'll filter in the calling function
-                style=style,  # Pass style for temperature schedule selection
-                dirichlet_alpha=dirichlet_alpha  # Pass through the alpha parameter
+                num_simulations=config.get('mcts_simulations', 100),
+                temperature_schedule=None,  # Uses style-based schedule
+                max_moves=config.get('max_moves', 150),
+                enable_resignation=config.get('enable_resignation', True),
+                filter_draws=False,  # Handle filtering at higher level
+                style=style,
+                dirichlet_alpha=config.get('dirichlet_alpha', 0.3)
             )
             
             if not training_examples:
                 self.logger.warning(f"Game {game_id} generated no training examples")
                 return None
             
-            # Calculate final reward from the last example
-            final_reward = training_examples[-1].outcome if training_examples else 0.0
+            # DEDUPLICATED: Use centralized result analysis
+            outcome_info = self.result_analyzer.analyze_game_outcome(
+                training_examples, game_resigned, winner
+            )
             
-            # Enhanced outcome logging with resignation info
-            if game_resigned:
-                if winner == 1:
-                    outcome_str = "White wins by resignation"
-                elif winner == -1:
-                    outcome_str = "Black wins by resignation"
-                else:
-                    outcome_str = "Draw by resignation"  # Shouldn't happen but handle gracefully
-            else:
-                if winner == 1:
-                    outcome_str = "White wins"
-                elif winner == -1:
-                    outcome_str = "Black wins"
-                else:
-                    outcome_str = "Draw"
+            # DEDUPLICATED: Use centralized image saving
+            if self.image_manager and config.get('save_board_images', False):
+                self.image_manager.save_game_images(
+                    initial_position=initial_position,
+                    final_state=final_state,
+                    training_examples=training_examples,
+                    game_id=game_id,
+                    opening=opening,
+                    outcome_str=outcome_info['outcome_description'],
+                    move_history=move_history
+                )
             
-            # Log game outcome with additional statistics
-            outcome_distribution = {}
-            for ex in training_examples:
-                outcome_key = "win" if ex.outcome > 0.5 else "loss" if ex.outcome < -0.5 else "draw"
-                outcome_distribution[outcome_key] = outcome_distribution.get(outcome_key, 0) + 1
-            
-            self.logger.info(f"Game {game_id}: {outcome_str} after {len(training_examples)} moves")
-            self.logger.info(f"Training examples distribution: {outcome_distribution}")
-            
-            # Save board images if enabled
-            if save_board_images:
-                self._save_game_board_images(initial_position, final_state, training_examples, game_id, opening, outcome_str, board_images_dir, move_history)
-            
-            # Calculate style adherence (simplified - based on opening usage)
-            opening_moves_played = len(opening.moves) if opening else 0
-            style_adherence = min(opening_moves_played / max(len(training_examples), 1), 1.0) if opening else 0.0
+            # DEDUPLICATED: Use centralized style adherence calculation
+            style_adherence = self._calculate_style_adherence(opening, training_examples)
             
             return SelfPlayGameResult(
                 training_examples=training_examples,
                 game_length=len(training_examples),
-                final_result=final_reward,
+                final_result=training_examples[-1].outcome if training_examples else 0.0,
                 opening_used=opening.name if opening else None,
                 style_adherence=style_adherence
             )
             
         except Exception as e:
             self.logger.error(f"Error generating game {game_id}: {e}")
-            import traceback
-            self.logger.error(f"Full traceback: {traceback.format_exc()}")
             return None
     
-    def _save_game_board_images(self, initial_position: ChessPosition, 
-                               final_state: ChessGameState,
-                               training_examples: List[AlphaZeroTrainingExample],
-                               game_id: str, opening: Optional[OpeningTemplate], 
-                               outcome_str: str, board_images_dir: str = "board_images",
-                               move_history: List[dict] = None) -> None:
-        """
-        Save starting and ending board positions as images, plus complete move history as JSON.
-        """
-        try:
-            # Create a subdirectory for this game
-            game_dir = os.path.join(board_images_dir, game_id)
-            os.makedirs(game_dir, exist_ok=True)
-            
-            # Save starting position
-            opening_name = opening.name if opening else "random"
-            start_filename = os.path.join(game_dir, f"start_{opening_name}")
-            start_title = f"Game {game_id} - Start Position\nOpening: {opening_name}"
-            
-            if save_board_image(initial_position.board, start_filename, start_title):
-                self.logger.debug(f"Saved starting position for game {game_id}")
-            
-            # Save final position using the actual final state
-            end_filename = os.path.join(game_dir, f"end_{outcome_str.replace(' ', '_')}")
-            end_title = f"Game {game_id} - End Position\nOutcome: {outcome_str}\nMoves: {len(training_examples)}"
-            
-            if save_board_image(final_state.board, end_filename, end_title):
-                self.logger.debug(f"Saved ending position for game {game_id}")
-            
-            # Save complete move history as JSON
-            if move_history:
-                game_data = {
-                    "game_id": game_id,
-                    "opening": {
-                        "name": opening_name,
-                        "moves": opening.moves if opening else []
-                    },
-                    "outcome": outcome_str,
-                    "total_moves": len(training_examples),
-                    "starting_fen": initial_position.board.fen(),
-                    "final_fen": final_state.board.fen(),
-                    "move_history": move_history,
-                    "metadata": {
-                        "game_length": len(move_history) - 1,  # -1 because first entry is starting position
-                        "opening_moves_played": len(opening.moves) if opening else 0,
-                        "resignation": "resignation" in outcome_str.lower()
-                    }
-                }
-                
-                json_file = os.path.join(game_dir, "game_moves.json")
-                with open(json_file, 'w') as f:
-                    json.dump(game_data, f, indent=2)
-                self.logger.debug(f"Saved move history JSON for game {game_id}")
-            
-            # Create a summary file with game info
-            summary_file = os.path.join(game_dir, "game_info.txt")
-            with open(summary_file, 'w') as f:
-                f.write(f"Game ID: {game_id}\n")
-                f.write(f"Opening: {opening_name}\n")
-                f.write(f"Outcome: {outcome_str}\n")
-                f.write(f"Total Moves: {len(training_examples)}\n")
-                f.write(f"Starting FEN: {initial_position.board.fen()}\n")
-                f.write(f"Final FEN: {final_state.board.fen()}\n")
-                if opening and opening.moves:
-                    f.write(f"Opening Moves: {' '.join(opening.moves)}\n")
-            
-            self.logger.info(f"📷 Saved board images for game {game_id} to {game_dir}")
-        
-        except Exception as e:
-            self.logger.error(f"Failed to save board images for game {game_id}: {e}")
-    
     def _select_opening_for_style(self, style: str) -> Optional[OpeningTemplate]:
-        """
-        Select an opening template based on the target style.
-        
-        Args:
-            style: Target playing style
-            
-        Returns:
-            Selected opening template or None if no openings available
-        """
+        """Select opening with error handling."""
         try:
             return self.opening_db.sample_opening_for_style(style)
         except Exception as e:
@@ -457,127 +238,96 @@ class StyleSpecificSelfPlay:
             return None
     
     def _create_position_from_opening(self, opening: Optional[OpeningTemplate]) -> ChessPosition:
-        """
-        Create a chess position from an opening template.
-        
-        Args:
-            opening: Opening template with move sequence
-            
-        Returns:
-            ChessPosition after playing the opening moves
-        """
+        """Create position from opening with variation."""
         board = chess.Board()
         
         if opening is not None:
             try:
-                # Play opening moves up to a random depth for variation
-                max_depth = min(len(opening.moves), opening.continuation_depth)
-                
-                # Sometimes play partial opening for more variation
-                if max_depth > 4:
-                    depth = random.randint(max(4, max_depth - 3), max_depth)
-                else:
-                    depth = max_depth
-                
-                for i in range(depth):
-                    if i < len(opening.moves):
-                        move_san = opening.moves[i]
-                        try:
-                            move = board.parse_san(move_san)
-                            if move in board.legal_moves:
-                                board.push(move)
-                            else:
-                                self.logger.warning(f"Illegal move in opening {opening.name}: {move_san}")
-                                break
-                        except Exception as e:
-                            self.logger.warning(f"Failed to parse move {move_san} in opening {opening.name}: {e}")
-                            break
-                    else:
-                        break
+                # DEDUPLICATED: Use centralized opening application logic
+                applied_moves = TrainingUtilities.apply_opening_moves(
+                    board, opening.moves, opening.continuation_depth
+                )
+                self.logger.debug(f"Applied {applied_moves} moves from opening {opening.name}")
                         
             except Exception as e:
                 self.logger.warning(f"Error applying opening {opening.name}: {e}")
-                # Fall back to starting position
-                board = chess.Board()
+                board = chess.Board()  # Fall back to starting position
         
         return ChessPosition(board)
     
+    def _calculate_style_adherence(self, opening: Optional[OpeningTemplate], 
+                                 training_examples: List[AlphaZeroTrainingExample]) -> float:
+        """Calculate how well the game followed the target style."""
+        if not opening:
+            return 0.0
+        
+        opening_moves_played = len(opening.moves)
+        total_moves = len(training_examples)
+        
+        # Simple adherence metric: ratio of opening moves to total moves
+        return min(opening_moves_played / max(total_moves, 1), 1.0)
+    
     def get_statistics(self) -> Dict[str, Any]:
         """
-        Get statistics about generated games and opening usage.
+        Get comprehensive statistics - DEDUPLICATED.
         
-        Returns:
-            Dictionary with detailed statistics
+        Uses centralized statistics manager.
         """
-        return {
-            'total_games_generated': self.games_generated,
-            'style_statistics': self.style_stats.copy(),
-            'opening_usage': self.openings_used.copy(),
-            'most_used_openings': sorted(
-                self.openings_used.items(), 
-                key=lambda x: x[1], 
-                reverse=True
-            )[:10],
-            'average_game_lengths': {
-                style: stats['avg_length'] 
-                for style, stats in self.style_stats.items()
-            }
-        }
+        return self.statistics.get_comprehensive_report()
     
     def reset_statistics(self) -> None:
-        """Reset all statistics tracking."""
-        self.games_generated = 0
-        self.openings_used.clear()
-        self.style_stats = {
-            'tactical': {'games': 0, 'avg_length': 0},
-            'positional': {'games': 0, 'avg_length': 0},
-            'dynamic': {'games': 0, 'avg_length': 0}
-        }
+        """Reset all statistics."""
+        self.statistics.reset()
         self.logger.info("Statistics reset")
 
 
-# Utility functions for testing and validation
-def validate_style_specific_generation(style: str, num_test_games: int = 5) -> None:
-    """
-    Validate that style-specific self-play generation works correctly.
-    
-    Args:
-        style: Style to test ('tactical', 'positional', 'dynamic')
-        num_test_games: Number of test games to generate
-    """
+# DEDUPLICATED: Simplified utility functions using centralized testing
+def validate_style_specific_generation(style: str, num_test_games: int = 5) -> bool:
+    """Validate style generation using centralized test utilities."""
     print(f"Validating {style} style generation with {num_test_games} games...")
     
-    # Create a dummy model for testing
-    from ..core.alphazero_net import create_alphazero_chess_net
-    test_model = create_alphazero_chess_net()
+    # Use centralized test model creation
+    from ..training.training_utils import TestUtilities
+    test_model = TestUtilities.create_test_model()
     
     # Create self-play generator
     generator = StyleSpecificSelfPlay()
     
-    # Generate test games
-    training_examples = generator.generate_training_examples(
-        model=test_model,
-        style=style,
-        num_games=num_test_games,
-        mcts_simulations=100,  # Reduced for testing
-        temperature_moves=10,
-        enable_resignation=True,  # Default for testing
-        resignation_threshold=-0.9,  # Default for testing
-        max_moves=120  # Shorter for testing
-    )
+    # Generate test games with minimal configuration
+    test_config = {
+        'mcts_simulations': 50,  # Reduced for testing
+        'max_moves': 120,
+        'enable_resignation': True,
+        'resignation_threshold': -0.9
+    }
     
-    # Display results
-    stats = generator.get_statistics()
-    print(f"Generated {len(training_examples)} training examples")
-    print(f"Style statistics: {stats['style_statistics'][style]}")
-    print(f"Openings used: {stats['opening_usage']}")
-    
-    return len(training_examples) > 0
+    try:
+        training_examples = generator.generate_training_examples(
+            model=test_model,
+            style=style,
+            num_games=num_test_games,
+            **test_config
+        )
+        
+        # Use centralized result validation
+        validation_result = TestUtilities.validate_training_examples(training_examples)
+        
+        print(f"Generated {len(training_examples)} training examples")
+        print(f"Validation: {validation_result}")
+        
+        return len(training_examples) > 0
+        
+    except Exception as e:
+        print(f"Validation failed: {e}")
+        return False
 
 
 def test_all_styles() -> None:
-    """Test self-play generation for all three styles."""
+    """Test all styles using centralized test framework."""
+    from ..training.training_utils import TestUtilities
+    
     styles = ['tactical', 'positional', 'dynamic']
+    results = {}
     
     for style in styles:
         print(f"\n{'='*50}")
@@ -586,11 +336,15 @@ def test_all_styles() -> None:
         
         try:
             success = validate_style_specific_generation(style, num_test_games=2)
+            results[style] = success
             print(f"✅ {style} style test: {'PASSED' if success else 'FAILED'}")
         except Exception as e:
+            results[style] = False
             print(f"❌ {style} style test FAILED: {e}")
+    
+    # Use centralized test reporting
+    TestUtilities.generate_test_report(results, "Style-Specific Self-Play Tests")
 
 
 if __name__ == "__main__":
-    # Run validation tests
     test_all_styles()

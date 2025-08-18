@@ -1,44 +1,39 @@
 """
-AlphaZero Monte Carlo Tree Search Implementation - DEDUPLICATED VERSION
+AlphaZero Monte Carlo Tree Search Implementation
 
-This version removes all duplicated logic by using centralized training utilities.
-All shared functionality has been moved to training_utils.py.
+This implementation follows AlphaZero's approach where:
+1. Neural network provides move priors and position evaluation
+2. PUCT (Polynomial UCT) replaces UCB1 for selection
+3. No random rollouts - neural network evaluation at leaf nodes
+4. Tree search guided by neural network policy
 
 Based on Silver et al. (2017): "Mastering Chess and Shogi by Self-Play 
 with a General Reinforcement Learning Algorithm"
 """
 
 import math
-import chess
 import torch
 import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple, Any
-from pathlib import Path
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
+import logging
 
-from src.core.game_utils import ChessGameState
+from .game_utils import ChessGameState
 
-# Use lazy imports to avoid circular dependency
-def _get_training_utilities():
-    """Lazy import of training utilities to avoid circular imports."""
-    from src.training.training_utils import TrainingUtilities
-    return TrainingUtilities
+logger = logging.getLogger(__name__)
 
-def _get_temperature_schedules():
-    """Lazy import of temperature schedules to avoid circular imports."""
-    from src.training.training_utils import TemperatureSchedules
-    return TemperatureSchedules
 
-def _get_resignation_logic():
-    """Lazy import of resignation logic to avoid circular imports."""
-    from src.training.training_utils import ResignationLogic
-    return ResignationLogic
-
-def _get_game_outcome_analyzer():
-    """Lazy import of game outcome analyzer to avoid circular imports."""
-    from src.training.training_utils import GameOutcomeAnalyzer
-    return GameOutcomeAnalyzer
+class AlphaZeroTrainingExample:
+    """Container for AlphaZero training examples."""
+    
+    def __init__(self, state_tensor: torch.Tensor, action_probs: Dict[Any, float], 
+                 outcome: float, current_player: int):
+        self.state_tensor = state_tensor
+        self.action_probs = action_probs  
+        self.outcome = outcome
+        self.current_player = current_player
+    
+    def __repr__(self):
+        return f"AlphaZeroTrainingExample(outcome={self.outcome}, current_player={self.current_player})"
 
 
 class AlphaZeroNode:
@@ -78,63 +73,70 @@ class AlphaZeroNode:
     def expand(self, policy_probs: torch.Tensor, value: float, legal_actions: List[Any],
                action_to_index_fn) -> None:
         """
-        Expand this node using neural network outputs.
-        
-        Args:
-            policy_probs: Neural network policy output (softmax probabilities)
-            value: Neural network value output  
-            legal_actions: List of legal actions from this state
-            action_to_index_fn: Function to convert action to policy index
+        Expand this node using neural network outputs with better error handling.
         """
         self.is_expanded = True
         self.neural_value = value
         
+        if not legal_actions:
+            logger.warning("Expanding node with no legal actions")
+            return
+        
         # Extract prior probabilities for legal actions
         total_prob = 0.0
         for action in legal_actions:
-            action_idx = action_to_index_fn(action)
-            prob = policy_probs[action_idx].item()
-            self.prior_probs[action] = prob
-            total_prob += prob
+            try:
+                action_idx = action_to_index_fn(action)
+                if 0 <= action_idx < len(policy_probs):
+                    prob = policy_probs[action_idx].item()
+                    self.prior_probs[action] = prob
+                    total_prob += prob
+                else:
+                    logger.warning(f"Action index {action_idx} out of bounds for policy size {len(policy_probs)}")
+                    self.prior_probs[action] = 1e-8  # Small probability for invalid actions
+            except Exception as e:
+                logger.warning(f"Error processing action {action}: {e}")
+                self.prior_probs[action] = 1e-8
         
-        # Normalize priors over legal actions (handles illegal moves)
-        if total_prob > 0:
+        # Normalize priors over legal actions
+        if total_prob > 1e-10:  # Use small epsilon instead of 0
             for action in self.prior_probs:
                 self.prior_probs[action] /= total_prob
         else:
-            # Uniform if all legal actions have zero probability
+            # Uniform distribution if all legal actions have zero probability
             uniform_prob = 1.0 / len(legal_actions)
             for action in legal_actions:
                 self.prior_probs[action] = uniform_prob
     
-    def select_child(self, c_puct: float = 2.0) -> Tuple[Any, 'AlphaZeroNode']:
+    def select_child(self) -> Tuple[Any, 'AlphaZeroNode']:
         """
-        Select child using PUCT algorithm.
-        
-        PUCT formula: Q(s,a) + c_puct * P(s,a) * √(Σ_b N(s,b)) / (1 + N(s,a))
-        
-        Returns:
-            Tuple of (action, child_node) with highest PUCT value
+        Select child using improved PUCT algorithm.
         """
+        if not self.prior_probs:
+            logger.warning("Selecting child from node with no prior probabilities")
+            return None, None
+        
         best_action = None
         best_value = float('-inf')
+        
+        sqrt_parent_visits = math.sqrt(max(self.visit_count, 1))  # Avoid sqrt(0)
         
         for action in self.prior_probs:
             if action in self.children:
                 child = self.children[action]
                 # Q(s,a): Average action value
-                q_value = child.value_sum / child.visit_count if child.visit_count > 0 else 0.0
+                if child.visit_count > 0:
+                    q_value = child.value_sum / child.visit_count
+                else:
+                    q_value = 0.0
+                visit_count = child.visit_count
             else:
                 q_value = 0.0  # Unvisited children start with Q=0
+                visit_count = 0
             
             # PUCT exploration term
             prior_prob = self.prior_probs[action]
-            exploration = c_puct * prior_prob * math.sqrt(self.visit_count)
-            
-            if action in self.children:
-                exploration /= (1 + self.children[action].visit_count)
-            else:
-                exploration /= 1  # Unvisited: denominator is 1
+            exploration = self.c_puct * prior_prob * sqrt_parent_visits / (1 + visit_count)
             
             puct_value = q_value + exploration
             
@@ -142,69 +144,74 @@ class AlphaZeroNode:
                 best_value = puct_value
                 best_action = action
         
+        if best_action is None:
+            logger.warning("No action selected in PUCT")
+            return None, None
+        
         # Create child if it doesn't exist
         if best_action not in self.children:
-            child_state = self.state.apply_action(best_action)
-            self.children[best_action] = AlphaZeroNode(
-                child_state, parent=self, parent_action=best_action,
-                prior_prob=self.prior_probs[best_action]
-            )
+            try:
+                child_state = self.state.apply_action(best_action)
+                self.children[best_action] = AlphaZeroNode(
+                    child_state, parent=self, parent_action=best_action,
+                    prior_prob=self.prior_probs[best_action]
+                )
+            except Exception as e:
+                logger.error(f"Error creating child for action {best_action}: {e}")
+                return None, None
         
         return best_action, self.children[best_action]
     
     def backup(self, value: float) -> None:
-        """
-        Backup value through this node.
-        Value is from perspective of player to move at this node.
-        """
+        """Backup value through this node."""
         self.visit_count += 1
         self.value_sum += value
     
+    def get_q_value(self) -> float:
+        """Get the Q-value (average value) of this node."""
+        if self.visit_count == 0:
+            return 0.0
+        return self.value_sum / self.visit_count
+    
     def get_action_probabilities(self, temperature: float = 1.0) -> Dict[Any, float]:
-        """
-        Get action probabilities based on visit counts.
-        
-        Args:
-            temperature: Temperature parameter
-                - temperature = 0: argmax (deterministic)  
-                - temperature > 0: softmax over visit counts
-                - temperature = 1: proportional to visit counts
-        """
+        """Get action probabilities with improved temperature handling."""
         if not self.children:
             return {}
         
         actions = list(self.children.keys())
         visit_counts = [self.children[action].visit_count for action in actions]
         
+        if all(count == 0 for count in visit_counts):
+            # All children unvisited - return uniform
+            uniform_prob = 1.0 / len(actions)
+            return {action: uniform_prob for action in actions}
+        
         if temperature == 0:
             # Deterministic: choose action with most visits
-            best_idx = max(range(len(visit_counts)), key=lambda i: visit_counts[i])
-            probs = [0.0] * len(actions)
-            probs[best_idx] = 1.0
+            max_visits = max(visit_counts)
+            probs = [1.0 if count == max_visits else 0.0 for count in visit_counts]
+            # Normalize in case of ties
+            prob_sum = sum(probs)
+            if prob_sum > 0:
+                probs = [p / prob_sum for p in probs]
         else:
-            # Softmax with temperature
+            # Temperature scaling
             if temperature == 1.0:
                 # Proportional to visit counts
                 total_visits = sum(visit_counts)
-                if total_visits > 0:
-                    probs = [count / total_visits for count in visit_counts]
-                else:
-                    probs = [1.0 / len(actions)] * len(actions)
+                probs = [count / total_visits for count in visit_counts]
             else:
-                # General temperature scaling
+                # General temperature scaling with numerical stability
                 scaled_counts = [count / temperature for count in visit_counts]
+                max_scaled = max(scaled_counts) if scaled_counts else 0
+                exp_counts = [math.exp(count - max_scaled) for count in scaled_counts]
+                sum_exp = sum(exp_counts)
                 
-                # Numerical stability: subtract max
-                if scaled_counts:
-                    max_scaled = max(scaled_counts)
-                    exp_counts = [math.exp(count - max_scaled) for count in scaled_counts]
-                    sum_exp = sum(exp_counts)
-                    if sum_exp > 0:
-                        probs = [exp_count / sum_exp for exp_count in exp_counts]
-                    else:
-                        probs = [1.0 / len(actions)] * len(actions)
+                if sum_exp > 0:
+                    probs = [exp_count / sum_exp for exp_count in exp_counts]
                 else:
-                    probs = []
+                    # Fallback to uniform
+                    probs = [1.0 / len(actions)] * len(actions)
         
         return {action: prob for action, prob in zip(actions, probs)}
     
@@ -218,28 +225,26 @@ class AlphaZeroNode:
 
 class AlphaZeroMCTS:
     """
-    AlphaZero Monte Carlo Tree Search - DEDUPLICATED VERSION
-    
-    Uses centralized utilities from training_utils.py to eliminate duplication.
+    AlphaZero Monte Carlo Tree Search implementation.
     """
     
-    def __init__(self, neural_network, c_puct: float = 2.0, device: str = 'cpu', 
+    def __init__(self, neural_network, c_puct: float = 1.25, device: str = 'cpu', 
                  resignation_threshold: float = -0.9, logger=None):
         """
         Initialize AlphaZero MCTS.
         
         Args:
             neural_network: AlphaZero neural network (policy + value)
-            c_puct: PUCT exploration constant (increased to 2.0 for more exploration)
+            c_puct: PUCT exploration constant (1.25 is standard for chess)
             device: PyTorch device for neural network inference
-            resignation_threshold: Value threshold for resignation (-0.9 = 90% loss probability)
+            resignation_threshold: Value threshold for resignation
             logger: Logger instance for worker logging
         """
         self.neural_network = neural_network
         self.c_puct = c_puct
         self.device = device
         self.resignation_threshold = resignation_threshold
-        self.logger = logger
+        self.logger = logger or logging.getLogger(__name__)
         
         # Set network to evaluation mode
         self.neural_network.eval()
@@ -247,134 +252,131 @@ class AlphaZeroMCTS:
     def search(self, root_state: ChessGameState, num_simulations: int) -> AlphaZeroNode:
         """
         Run MCTS search for specified number of simulations.
-        
-        Args:
-            root_state: Starting chess position
-            num_simulations: Number of MCTS simulations to run
-            
-        Returns:
-            Root node of search tree with visit statistics
         """
         # Create root node
         root = AlphaZeroNode(root_state)
         
         # Expand root immediately if not terminal
         if not root_state.is_terminal():
-            self._expand_node(root)
+            try:
+                self._expand_node(root)
+            except Exception as e:
+                logger.error(f"Error expanding root node: {e}")
+                return root
         
         # Run simulations
-        for _ in range(num_simulations):
-            self._simulate(root)
+        successful_simulations = 0
+        for i in range(num_simulations):
+            try:
+                self._simulate(root)
+                successful_simulations += 1
+            except Exception as e:
+                logger.warning(f"Simulation {i} failed: {e}")
+                # Continue with remaining simulations
+                
+        if successful_simulations == 0:
+            logger.error("All MCTS simulations failed")
         
         return root
     
     def _simulate(self, root: AlphaZeroNode) -> None:
-        """
-        Single MCTS simulation:
-        1. Selection: Navigate tree using PUCT
-        2. Expansion: Expand leaf node with neural network
-        3. Backup: Propagate value up the tree
-        """
+        """Single MCTS simulation with corrected backup logic."""
         # Phase 1: Selection - navigate to leaf
         path = []
         current = root
         
         while not current.is_leaf() and not current.state.is_terminal():
-            action, child = current.select_child(self.c_puct)
+            action, child = current.select_child()
+            if action is None or child is None:
+                break
             path.append((current, action, child))
             current = child
         
         # Phase 2: Expansion & Evaluation
         if current.state.is_terminal():
-            # Terminal reward from correct perspective
-            raw_reward = current.state.get_reward()
-            value = raw_reward  # Use the reward as-is since get_reward() should handle perspective
+            # Terminal node: use game outcome
+            value = current.state.get_reward()
         else:
             if current.is_leaf():
                 # Expand leaf node with neural network
                 self._expand_node(current)
-            # Use neural network value estimate (already from correct perspective)
+            # Use neural network value estimate
             value = current.neural_value
         
-        # Phase 3: Backup - propagate value up tree
+        # Phase 3: Backup - propagate value up tree with correct perspective
         current_value = value
+        
+        # Backup the leaf node first
+        current.backup(current_value)
         
         # Backup through path (alternating perspective)
         for node, action, child in reversed(path):
-            child.backup(current_value)
-            current_value = -current_value  # Flip for opponent
-        
-        # Backup root
-        root.backup(current_value)
+            # Flip value for the parent (different player's perspective)
+            current_value = -current_value
+            node.backup(current_value)
     
     @torch.no_grad()
     def _expand_node(self, node: AlphaZeroNode) -> None:
-        """
-        Expand node using neural network evaluation.
-        
-        Args:
-            node: Node to expand
-        """
-        # Convert state to neural network input
-        state_tensor = node.state.to_tensor().unsqueeze(0).to(self.device)  # Add batch dim
-        
-        # Forward pass through neural network
-        policy_logits, value = self.neural_network(state_tensor)
-        
-        # Convert outputs
-        policy_probs = F.softmax(policy_logits, dim=-1).squeeze(0)  # Remove batch dim
-        
-        # Apply tanh since it was removed from neural network forward()
-        value = torch.tanh(value).item()  # Scalar value in [-1, 1]
-        
-        # Get legal actions
-        legal_actions = node.state.get_legal_actions()
-        
-        # Expand node with neural network outputs
-        node.expand(policy_probs, value, legal_actions, node.state.action_to_index)
+        """Expand node using neural network evaluation with error handling."""
+        try:
+            # Convert state to neural network input
+            state_tensor = node.state.to_tensor().unsqueeze(0).to(self.device)
+            
+            # Forward pass through neural network
+            policy_logits, value = self.neural_network(state_tensor)
+            
+            # Convert outputs
+            policy_probs = F.softmax(policy_logits, dim=-1).squeeze(0)
+            value = torch.tanh(value).item()  # Ensure value is in [-1, 1]
+            
+            # Get legal actions
+            legal_actions = node.state.get_legal_actions()
+            
+            if not legal_actions:
+                logger.warning("No legal actions for node expansion")
+                return
+            
+            # Expand node with neural network outputs
+            node.expand(policy_probs, value, legal_actions, node.state.action_to_index)
+            
+        except Exception as e:
+            logger.error(f"Error in node expansion: {e}")
+            # Fallback: mark as expanded with uniform priors
+            legal_actions = node.state.get_legal_actions()
+            if legal_actions:
+                node.is_expanded = True
+                node.neural_value = 0.0
+                uniform_prob = 1.0 / len(legal_actions)
+                for action in legal_actions:
+                    node.prior_probs[action] = uniform_prob
     
     def should_resign(self, value: float, move_count: int, current_state: ChessGameState = None) -> bool:
         """
-        DEDUPLICATED: Use centralized resignation logic.
+        Check if should resign based on position evaluation.
         
         Args:
             value: Current position evaluation
             move_count: Number of moves played
-            current_state: Current game state (optional, for material evaluation)
+            current_state: Current game state (optional)
             
         Returns:
             True if should resign, False otherwise
         """
-        resignation_logic = _get_resignation_logic()
-        should_resign, reason = resignation_logic.should_resign_combined(
-            value=value,
-            board=current_state.board if current_state else None,
-            move_count=move_count,
-            eval_threshold=self.resignation_threshold,
-            material_threshold=300,
-            min_moves=25
-        )
+        # Basic resignation logic
+        if move_count < 25:  # Don't resign too early
+            return False
         
-        if should_resign and self.logger:
-            player = 'white' if current_state and current_state.board.turn else 'black'
-            self.logger.info(f"RESIGNATION: {player} resigns at move {move_count} (reason: {reason})")
-            if current_state:
-                self.logger.info(f"RESIGNATION: FEN: {current_state.board.fen()}")
+        if value < self.resignation_threshold:
+            if self.logger:
+                player = 'white' if current_state and current_state.board.turn else 'black'
+                self.logger.info(f"RESIGNATION: {player} resigns at move {move_count} (eval: {value:.3f})")
+            return True
         
-        return should_resign
+        return False
     
     def get_best_action(self, root_state: ChessGameState, 
                        num_simulations: int = 800) -> Any:
-        """
-        Get best action using MCTS search.
-        
-        Args:
-            root_state: Chess position to analyze
-            num_simulations: Number of MCTS simulations
-            
-        Returns:
-            Best action according to MCTS
-        """
+        """Get best action using MCTS search."""
         if root_state.is_terminal():
             return None
         
@@ -386,46 +388,51 @@ class AlphaZeroMCTS:
                                 temperature: float = 1.0,
                                 add_noise: bool = False,
                                 dirichlet_alpha: float = 0.3) -> Dict[Any, float]:
-        """
-        Get action probabilities using MCTS search.
-        
-        Args:
-            root_state: Chess position to analyze
-            num_simulations: Number of MCTS simulations
-            temperature: Temperature for probability calculation
-            add_noise: Whether to add Dirichlet noise for exploration (training only)
-            dirichlet_alpha: Dirichlet concentration parameter for noise
-            
-        Returns:
-            Dictionary mapping actions to probabilities
-        """
+        """Get action probabilities using MCTS search."""
         if root_state.is_terminal():
             return {}
         
         root = self.search(root_state, num_simulations)
         action_probs = root.get_action_probabilities(temperature)
         
-        # DEDUPLICATED: Use centralized Dirichlet noise with configurable alpha
+        # Add Dirichlet noise for exploration if requested
         if add_noise and action_probs:
-            training_utils = _get_training_utilities()
-            action_probs = training_utils.add_dirichlet_noise(action_probs, alpha=dirichlet_alpha)
+            action_probs = self._add_dirichlet_noise(action_probs, alpha=dirichlet_alpha)
         
         return action_probs
+    
+    def _add_dirichlet_noise(self, action_probs: Dict[Any, float], alpha: float = 0.3) -> Dict[Any, float]:
+        """Add Dirichlet noise to action probabilities for exploration."""
+        if not action_probs:
+            return action_probs
+        
+        try:
+            import numpy as np
+            
+            actions = list(action_probs.keys())
+            probs = list(action_probs.values())
+            
+            # Generate Dirichlet noise
+            noise = np.random.dirichlet([alpha] * len(actions))
+            
+            # Mix original probabilities with noise (75% original, 25% noise)
+            mixed_probs = [0.75 * p + 0.25 * n for p, n in zip(probs, noise)]
+            
+            # Normalize
+            total = sum(mixed_probs)
+            if total > 0:
+                mixed_probs = [p / total for p in mixed_probs]
+            
+            return {action: prob for action, prob in zip(actions, mixed_probs)}
+            
+        except Exception:
+            # Return original probabilities if noise addition fails
+            return action_probs
     
     def get_principal_variation(self, root_state: ChessGameState,
                                num_simulations: int = 800,
                                max_depth: int = 10) -> List[Any]:
-        """
-        Get principal variation (most visited path).
-        
-        Args:
-            root_state: Starting position
-            num_simulations: Number of MCTS simulations
-            max_depth: Maximum depth to follow
-            
-        Returns:
-            List of actions in principal variation
-        """
+        """Get principal variation (most visited path)."""
         root = self.search(root_state, num_simulations)
         
         variation = []
@@ -445,17 +452,6 @@ class AlphaZeroMCTS:
         return variation
 
 
-class AlphaZeroTrainingExample:
-    """Container for AlphaZero training examples."""
-    
-    def __init__(self, state_tensor: torch.Tensor, action_probs: Dict[Any, float], 
-                 outcome: float, current_player: int):
-        self.state_tensor = state_tensor
-        self.action_probs = action_probs  
-        self.outcome = outcome
-        self.current_player = current_player
-
-
 def generate_self_play_game(chess_engine: AlphaZeroMCTS, initial_state: ChessGameState,
                            num_simulations: int = 800,
                            temperature_schedule: callable = None,
@@ -466,32 +462,37 @@ def generate_self_play_game(chess_engine: AlphaZeroMCTS, initial_state: ChessGam
                            dirichlet_alpha: float = 0.3
                            ) -> tuple[List[AlphaZeroTrainingExample], ChessGameState, List[dict], bool, Optional[int]]:
     """
-    Generate a complete self-play game for training - DEDUPLICATED VERSION.
+    Generate a complete self-play game for training.
     
     Args:
         chess_engine: AlphaZeroMCTS instance
         initial_state: Starting chess position
         num_simulations: MCTS simulations per move
-        temperature_schedule: Function mapping move number to temperature (if None, uses style-based schedule)
+        temperature_schedule: Function mapping move number to temperature
         max_moves: Maximum moves before declaring draw
-        enable_resignation: Whether to allow resignation in hopeless positions
-        filter_draws: Whether to filter out drawn games from training data
-        style: Playing style for temperature schedule ('tactical', 'positional', 'dynamic', 'standard')
-        dirichlet_alpha: Dirichlet concentration parameter for exploration noise
+        enable_resignation: Whether to allow resignation
+        filter_draws: Whether to filter out drawn games
+        style: Playing style for temperature schedule
+        dirichlet_alpha: Dirichlet concentration parameter
         
     Returns:
         Tuple of (training_examples, final_state, move_history, game_resigned, winner)
     """
-    # DEDUPLICATED: Use centralized temperature schedule
+    # Default temperature schedule
     if temperature_schedule is None:
-        temp_schedules = _get_temperature_schedules()
-        temperature_schedule = temp_schedules.get_schedule_for_style(style)
+        if style == 'tactical':
+            temperature_schedule = lambda move: 1.2 if move < 20 else (0.8 if move < 40 else 0.0)
+        elif style == 'positional':
+            temperature_schedule = lambda move: 1.0 if move < 15 else (0.5 if move < 25 else 0.0)
+        elif style == 'dynamic':
+            temperature_schedule = lambda move: 1.1 if move < 25 else (0.7 if move < 50 else 0.0)
+        else:  # standard
+            temperature_schedule = lambda move: 1.0 if move < 30 else 0.0
     
     training_examples = []
     current_state = initial_state.clone()
     move_count = 0
     game_resigned = False
-    resigning_player = None
     winner = None
     move_history = []
     
@@ -513,25 +514,20 @@ def generate_self_play_game(chess_engine: AlphaZeroMCTS, initial_state: ChessGam
         action_probs = chess_engine.get_action_probabilities(
             current_state, num_simulations=num_simulations, 
             temperature=temperature, add_noise=add_noise,
-            dirichlet_alpha=dirichlet_alpha  # Pass through the alpha parameter
+            dirichlet_alpha=dirichlet_alpha
         )
         
-        # Check for resignation (only after getting action probabilities to get value estimate)
+        # Check for resignation
         if enable_resignation and move_count > 0:
-            # Get the root value from MCTS
             root = chess_engine.search(current_state, num_simulations)
             root_value = root.value_sum / root.visit_count if root.visit_count > 0 else 0.0
             
             if chess_engine.should_resign(root_value, move_count, current_state):
                 game_resigned = True
-                # The current player (who is about to move) resigns and loses
-                resigning_player = current_state.get_current_player()
-                # Winner is the opposite of the resigning player
-                winner = -resigning_player
-                final_outcome = -1.0  # Current player loses by resignation
+                winner = -current_state.get_current_player()  # Opponent wins
                 break
         
-        # Store training example (outcome will be filled in later)
+        # Store training example
         example = AlphaZeroTrainingExample(
             state_tensor=current_state.to_tensor().clone(),
             action_probs=action_probs.copy(),
@@ -540,16 +536,22 @@ def generate_self_play_game(chess_engine: AlphaZeroMCTS, initial_state: ChessGam
         )
         training_examples.append(example)
         
-        # DEDUPLICATED: Use centralized action sampling
-        training_utils = _get_training_utilities()
-        action = training_utils.sample_action_from_probabilities(action_probs, temperature)
+        # Sample action from probabilities
+        if temperature == 0.0:
+            # Deterministic: choose best action
+            action = max(action_probs.keys(), key=lambda a: action_probs[a])
+        else:
+            # Stochastic: sample from distribution
+            actions = list(action_probs.keys())
+            probabilities = list(action_probs.values())
+            action_idx = torch.multinomial(torch.tensor(probabilities), 1).item()
+            action = actions[action_idx]
         
         if action is None:
-            # No legal moves - this shouldn't happen but handle gracefully
             break
                 
         # Apply action and record move
-        move_san = current_state.board.san(action)  # Get SAN notation before applying move
+        move_san = current_state.board.san(action)
         current_state = current_state.apply_action(action)
         move_count += 1
         
@@ -559,35 +561,46 @@ def generate_self_play_game(chess_engine: AlphaZeroMCTS, initial_state: ChessGam
             "fen": current_state.board.fen(),
             "move": action.uci(),
             "move_san": move_san,
-            "player": "black" if current_state.get_current_player() == 1 else "white"  # Player who just moved
+            "player": "black" if current_state.get_current_player() == 1 else "white"
         })
     
-    # DEDUPLICATED: Use centralized game outcome analysis
-    game_analyzer = _get_game_outcome_analyzer()
+    # Determine game outcome
     if game_resigned:
-        game_result = game_analyzer.create_resignation_result(
-            resigning_player, move_count, current_state.board.fen()
-        )
+        final_outcome = -1.0 if winner == current_state.get_current_player() else 1.0
     elif current_state.is_terminal():
-        game_result = game_analyzer.analyze_terminal_position(current_state.board)
+        final_outcome = current_state.get_reward()
+        if current_state.board.outcome():
+            if current_state.board.outcome().winner is None:
+                winner = 0  # Draw
+            elif current_state.board.outcome().winner:
+                winner = 1  # White wins
+            else:
+                winner = -1  # Black wins
+        else:
+            winner = 0  # Draw
     else:
         # Game hit move limit - declare draw
-        from src.training.training_utils import GameResult
-        game_result = GameResult(
-            winner=0,
-            outcome_type="move_limit",
-            move_count=move_count,
-            final_fen=current_state.board.fen()
-        )
+        final_outcome = 0.0
+        winner = 0
     
-    # DEDUPLICATED: Use centralized outcome assignment
-    game_analyzer = _get_game_outcome_analyzer()
-    game_analyzer.assign_training_outcomes(training_examples, game_result)
-    winner = game_result.winner
+    # Update all training examples with game outcome
+    for example in training_examples:
+        if example.current_player == current_state.get_current_player():
+            example.outcome = final_outcome
+        else:
+            example.outcome = -final_outcome
     
-    # DEDUPLICATED: Use centralized filtering
-    if filter_draws:
-        from src.training.training_utils import TrainingExampleFilters
-        training_examples = TrainingExampleFilters.filter_decisive_games(training_examples)
+    # Filter draws if requested
+    if filter_draws and abs(final_outcome) < 0.5:
+        training_examples = []  # Remove drawn games
     
     return training_examples, current_state, move_history, game_resigned, winner
+
+
+# Make sure all classes are available for import
+__all__ = [
+    'AlphaZeroMCTS',
+    'AlphaZeroNode', 
+    'AlphaZeroTrainingExample',
+    'generate_self_play_game'
+]
