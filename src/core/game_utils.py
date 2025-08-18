@@ -24,7 +24,12 @@ class ChessGameState(ABC):
     def is_terminal(self) -> bool:
         """Return True if this is a terminal state."""
         pass
-    
+
+    @abstractmethod
+    def get_outcome(self) -> Optional[chess.Outcome]:
+        """Return game outcome for current player (1 for win, 0 for draw, -1 for loss)."""
+        pass
+
     @abstractmethod
     def get_reward(self) -> float:
         """Return reward for current player in terminal state."""
@@ -86,6 +91,9 @@ class ChessPosition(ChessGameState):
         """Return list of legal moves from current position."""
         return list(self.board.legal_moves)
     
+    def get_outcome(self) -> Optional[chess.Outcome]:
+        return self.board.outcome()
+
     def apply_action(self, action: chess.Move) -> 'ChessPosition':
         """
         Return new ChessPosition after applying the given move.
@@ -472,20 +480,6 @@ def evaluate_material_balance(board: chess.Board) -> float:
         return black_material - white_material
 
 
-def is_material_advantage_overwhelming(board: chess.Board, threshold_centipawns: int = 500) -> bool:
-    """
-    Check if current player has an overwhelming material advantage that should trigger resignation.
-    
-    Args:
-        board: Chess board position
-        threshold_centipawns: Minimum material advantage to consider overwhelming (default: 500 = 5 pawns)
-        
-    Returns:
-        True if current player has overwhelming material advantage
-    """
-    return evaluate_material_balance(board) >= threshold_centipawns
-
-
 def should_resign_material(board: chess.Board, threshold_centipawns: int = 500) -> bool:
     """
     Check if current player should resign due to overwhelming material disadvantage.
@@ -493,7 +487,7 @@ def should_resign_material(board: chess.Board, threshold_centipawns: int = 500) 
     Args:
         board: Chess board position  
         threshold_centipawns: Minimum material disadvantage to trigger resignation (default: 500 = 5 pawns)
-        
+
     Returns:
         True if current player should resign due to material disadvantage
     """

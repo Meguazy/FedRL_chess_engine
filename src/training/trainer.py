@@ -21,7 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.multiprocessing as mp
 from pathlib import Path
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Optional
 from datetime import datetime
 import queue
 import time
@@ -34,7 +34,8 @@ from ..training.training_utils import (
     TemperatureSchedules,
     TrainingExampleFilters,
     GameOutcomeAnalyzer,
-    GameResult
+    GameResult,
+    FileManager  # Add FileManager import
 )
 
 try:
@@ -124,6 +125,9 @@ class ParallelTrainer:
         self.training_started = False
         self.checkpoint_dir = Path("checkpoints")
         self.checkpoint_dir.mkdir(exist_ok=True)
+        
+        # Initialize FileManager for centralized file operations
+        self.file_manager = FileManager(base_dir="training_data", logger=self.logger)
         
         # TensorBoard setup
         self.tensorboard_dir = Path("logs/tensorboard")
@@ -540,22 +544,35 @@ class ParallelTrainer:
                 worker_logger.info(f"Starting iteration {iteration + 1}/{max_iterations}")
                 
                 try:
-                    # Generate self-play training data
+                    # Generate self-play training data with iteration-aware anti-draw measures
                     worker_logger.info(f"Starting self-play data generation...")
                     worker_logger.info(f"Target: {job['games_per_iteration']} games with {job['mcts_simulations']} MCTS sims each")
+                    
+                    # Check if we should filter draws based on iteration
+                    filter_draws_until = job.get('filter_draws_until_iteration', 25)
+                    should_filter_draws = (iteration + 1) <= filter_draws_until
+                    if should_filter_draws:
+                        worker_logger.info(f"Draw filtering ENABLED (iteration {iteration + 1}/{filter_draws_until})")
+                    else:
+                        worker_logger.info(f"Draw filtering DISABLED (iteration {iteration + 1} > {filter_draws_until})")
+                    
                     games_start = time.time()
                     training_examples = self_play_coordinator.generate_training_examples(
                         model=model,
                         style=job['style'],
                         num_games=job['games_per_iteration'],
                         mcts_simulations=job['mcts_simulations'],
-                        dirichlet_alpha=job['dirichlet_alpha'],  # Still passed but handled centrally
+                        dirichlet_alpha=job['dirichlet_alpha'],
                         temperature_moves=job['temperature_moves'],
                         save_board_images=job.get('save_board_images', False),
                         board_images_dir=job.get('board_images_dir', 'board_images'),
                         enable_resignation=job.get('enable_resignation', True),
                         resignation_threshold=job.get('resignation_threshold', -0.9),
-                        max_moves=job.get('max_moves', 150)
+                        resignation_centipawns=job.get('resignation_centipawns', -700),
+                        max_moves=job.get('max_moves', 150),
+                        filter_draws=should_filter_draws,
+                        minimum_decisive_ratio=job.get('minimum_decisive_ratio', 0.75),
+                        early_termination_prob=job.get('early_termination_prob', 0.05)
                     )
                     games_time = time.time() - games_start
                     games_per_second = job['games_per_iteration'] / games_time if games_time > 0 else 0
@@ -1087,23 +1104,109 @@ class ParallelTrainer:
                                optimizer: torch.optim.Optimizer, 
                                scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau,
                                iteration: int, job: Dict[str, Any]) -> Path:
-        """Save checkpoint in worker process."""
-        checkpoint_dir = self.checkpoint_dir / job_id
-        checkpoint_dir.mkdir(exist_ok=True)
+        """Save checkpoint using centralized FileManager."""
         
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        checkpoint_path = checkpoint_dir / f"{job_id}_iter_{iteration}_{timestamp}.pth"
+        # Create a temporary FileManager for the worker process
+        worker_file_manager = FileManager(base_dir="training_data")
         
-        torch.save({
-            'iteration': iteration,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
+        # Prepare additional data with job-specific information
+        additional_data = {
+            'job_id': job_id,
             'job_config': job,
-            'timestamp': timestamp
-        }, checkpoint_path)
+            'style': job.get('style', 'unknown'),
+            'model_size': job.get('model_size', 'unknown'),
+            'iteration': iteration,
+            'scheduler_state_dict': scheduler.state_dict()
+        }
         
-        return checkpoint_path
+        # Use FileManager to save checkpoint
+        success = worker_file_manager.save_model_checkpoint(
+            model=model,
+            optimizer=optimizer,
+            epoch=iteration,  # Using iteration as epoch
+            loss=job.get('current_loss', 0.0),
+            additional_data=additional_data
+        )
+        
+        if success:
+            # Return the path where FileManager saved the checkpoint
+            return worker_file_manager.models_dir / f"checkpoint_epoch_{iteration:04d}.pt"
+        else:
+            # Fallback to original method if FileManager fails
+            checkpoint_dir = self.checkpoint_dir / job_id
+            checkpoint_dir.mkdir(exist_ok=True)
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            checkpoint_path = checkpoint_dir / f"{job_id}_iter_{iteration}_{timestamp}.pth"
+            
+            torch.save({
+                'iteration': iteration,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'job_config': job,
+                'timestamp': timestamp
+            }, checkpoint_path)
+            
+            return checkpoint_path
+    
+    def load_latest_checkpoint(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Load the latest checkpoint for a specific job using FileManager.
+        
+        Args:
+            job_id: Identifier for the training job
+            
+        Returns:
+            Dictionary with checkpoint data if found, None otherwise
+        """
+        latest_checkpoint_path = self.file_manager.get_latest_checkpoint()
+        
+        if latest_checkpoint_path:
+            try:
+                checkpoint_data = torch.load(latest_checkpoint_path, map_location='cpu')
+                
+                # Check if this checkpoint belongs to the requested job
+                if checkpoint_data.get('job_id') == job_id:
+                    self.logger.info(f"Loaded latest checkpoint for {job_id}: {latest_checkpoint_path}")
+                    return checkpoint_data
+                else:
+                    self.logger.warning(f"Latest checkpoint doesn't match job {job_id}")
+                    return None
+                    
+            except Exception as e:
+                self.logger.error(f"Failed to load checkpoint {latest_checkpoint_path}: {e}")
+                return None
+        else:
+            self.logger.info(f"No checkpoint found for job {job_id}")
+            return None
+    
+    def get_training_data_summary(self) -> Dict[str, Any]:
+        """
+        Get a comprehensive summary of all training data using FileManager.
+        
+        Returns:
+            Dictionary with training data statistics
+        """
+        return {
+            'files_by_date': self.file_manager.organize_files_by_date(),
+            'latest_checkpoint': self.file_manager.get_latest_checkpoint(),
+            'total_saved_files': len(list(self.file_manager.games_dir.rglob("*.pt")))
+        }
+    
+    def cleanup_old_training_data(self, days_to_keep: int = 30) -> int:
+        """
+        Clean up old training files using FileManager.
+        
+        Args:
+            days_to_keep: Number of days worth of files to keep
+            
+        Returns:
+            Number of files cleaned up
+        """
+        files_cleaned = self.file_manager.cleanup_old_files(days_to_keep)
+        self.logger.info(f"Cleaned up {files_cleaned} old training files")
+        return files_cleaned
     
     def _action_to_index(self, action) -> int:
         """

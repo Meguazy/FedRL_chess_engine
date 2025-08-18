@@ -10,32 +10,26 @@ Author: Francesco Finucci
 
 import torch
 import chess
-import numpy as np
 import logging
 import time
-import os
-import json
-from pathlib import Path
-from typing import List, Dict, Optional, Any, Tuple
+from typing import List, Dict, Optional, Any
 from dataclasses import dataclass
-import random
 
 from ..core.chess_engine import ChessPosition
-from ..core.game_utils import ChessGameState
-from ..core.alphazero_net import AlphaZeroNet
 from ..core.alphazero_mcts import AlphaZeroMCTS, AlphaZeroTrainingExample, generate_self_play_game
 from ..data.openings.openings import ECO_OpeningDatabase, OpeningTemplate
 
 # DEDUPLICATED: Import ALL utilities from centralized location
 from ..training.training_utils import (
     TrainingUtilities,
-    TemperatureSchedules, 
+    TemperatureSchedules,
     TrainingExampleFilters,
     GameOutcomeAnalyzer,
     GameStatistics,           # NEW: Centralized statistics
     BoardImageManager,        # NEW: Centralized image handling
     GameResultAnalyzer,       # NEW: Centralized result analysis
-    FileManager              # NEW: Centralized file operations
+    FileManager,
+    apply_opening_moves              # NEW: Centralized file operations
 )
 
 
@@ -94,17 +88,20 @@ class StyleSpecificSelfPlay:
         
         # Extract configuration with defaults
         mcts_simulations = config.get('mcts_simulations', 100)
-        dirichlet_alpha = config.get('dirichlet_alpha', 0.3)
-        enable_resignation = config.get('enable_resignation', True)
         resignation_threshold = config.get('resignation_threshold', -0.9)
-        max_moves = config.get('max_moves', 150)
-        save_board_images = config.get('save_board_images', False)
-        board_images_dir = config.get('board_images_dir', 'board_images')
+        resignation_centipawns = config.get('resignation_centipawns', -700)
+        c_puct = config.get('c_puct', 2.0)
         
         self.logger.info(f"Generating {num_games} {style} style games with {mcts_simulations} MCTS sims")
+        #self.logger.info(f"Anti-draw measures: resignation_threshold={resignation_threshold}, centipawns={resignation_centipawns}")
         
         # Create MCTS engine
-        mcts_engine = self._create_mcts_engine(model, resignation_threshold)
+        mcts_engine = self._create_mcts_engine(
+            model=model,
+            resignation_threshold=resignation_threshold,
+            resignation_centipawns=resignation_centipawns,
+            c_puct=c_puct
+        )
         
         all_training_examples = []
         game_results = []
@@ -112,13 +109,14 @@ class StyleSpecificSelfPlay:
         # Generate games
         for game_idx in range(num_games):
             try:
+                self.logger.info("---------------------------------------------------------")
                 self.logger.info(f"Starting game {game_idx + 1}/{num_games} ({style} style)")
                 
                 game_result = self._generate_single_game(
                     mcts_engine=mcts_engine,
                     style=style,
                     game_id=f"{style}_{game_idx}",
-                    config=config
+                    config=config,
                 )
 
                 if game_result and game_result.training_examples:
@@ -144,32 +142,87 @@ class StyleSpecificSelfPlay:
                 self.logger.warning(f"Failed to generate game {game_idx}: {e}")
                 continue
         
-        # DEDUPLICATED: Use centralized filtering and final analysis
-        filtered_examples = TrainingExampleFilters.filter_decisive_games(all_training_examples)
+        # DEDUPLICATED: Use centralized filtering with new anti-draw measures
+        filter_draws = config.get('filter_draws', True)
+        minimum_decisive_ratio = config.get('minimum_decisive_ratio', 0.75)
+        
+        if filter_draws:
+            # Apply aggressive draw filtering
+            filtered_examples = TrainingExampleFilters.filter_decisive_games(all_training_examples)
+            decisive_percentage = self.result_analyzer.calculate_decisive_percentage(game_results)
+            
+            # Check if we meet minimum decisive ratio
+            if decisive_percentage < minimum_decisive_ratio * 100:
+                self.logger.warning(f"⚠️  Low decisive ratio: {decisive_percentage:.1f}% < {minimum_decisive_ratio*100:.1f}% target")
+                self.logger.warning("Consider adjusting resignation thresholds or MCTS parameters")
+            
+            self.logger.info(f"Draw filtering ENABLED - Filtered to {len(filtered_examples)}/{len(all_training_examples)} examples")
+        else:
+            # Include all examples (draws allowed)
+            filtered_examples = all_training_examples
+            decisive_percentage = self.result_analyzer.calculate_decisive_percentage(game_results) if game_results else 0
+            self.logger.info(f"Draw filtering DISABLED - Using all {len(filtered_examples)} examples")
+        
         final_stats = self.statistics.get_style_summary(style)
-        decisive_percentage = self.result_analyzer.calculate_decisive_percentage(game_results)
         
         self.logger.info(f"Generated {len(game_results)}/{num_games} successful {style} games")
         self.logger.info(f"Decisive games: {decisive_percentage:.1f}%")
-        self.logger.info(f"Training examples: {len(filtered_examples)}/{len(all_training_examples)} after filtering")
+        self.logger.info(f"Final training examples: {len(filtered_examples)}")
         
         if decisive_percentage == 0:
             self.logger.warning("⚠️  NO DECISIVE GAMES GENERATED - All games were draws!")
         
+        # Use FileManager to save training examples and metadata
+        if filtered_examples:
+            timestamp = int(time.time())
+            filename = f"{style}_selfplay_{timestamp}_{len(filtered_examples)}examples"
+            
+            # Prepare comprehensive metadata
+            metadata = {
+                'style': style,
+                'num_games_requested': num_games,
+                'num_games_generated': len(game_results),
+                'num_training_examples': len(filtered_examples),
+                'decisive_percentage': decisive_percentage,
+                'config': config,
+                'final_stats': final_stats,
+                'generation_timestamp': timestamp,
+                'filter_draws_enabled': filter_draws,
+                'minimum_decisive_ratio': minimum_decisive_ratio
+            }
+            
+            # Save using FileManager
+            save_success = self.file_manager.save_training_examples(
+                examples=filtered_examples,
+                filename=filename,
+                metadata=metadata
+            )
+            
+            if save_success:
+                self.logger.info(f"💾 Saved training examples to disk: {filename}")
+            else:
+                self.logger.warning("❌ Failed to save training examples to disk")
+        
         return filtered_examples
-    
-    def _create_mcts_engine(self, model, resignation_threshold: float) -> AlphaZeroMCTS:
+
+    def _create_mcts_engine(self, model, resignation_threshold: float, c_puct: float = 2.0, resignation_centipawns: int = -500) -> AlphaZeroMCTS:
         """Create MCTS engine with proper configuration."""
         return AlphaZeroMCTS(
             model, 
-            c_puct=2.0,
+            c_puct=c_puct,
             device=self.device, 
             resignation_threshold=resignation_threshold,
+            resignation_centipawns=resignation_centipawns,
             logger=self.logger
         )
     
-    def _generate_single_game(self, mcts_engine: AlphaZeroMCTS, style: str,
-                             game_id: str, config: dict) -> Optional[SelfPlayGameResult]:
+    def _generate_single_game(
+            self, 
+            mcts_engine: AlphaZeroMCTS, 
+            style: str,
+            game_id: str, 
+            config: dict
+        ) -> Optional[SelfPlayGameResult]:
         """
         Generate a single self-play game - FULLY DEDUPLICATED.
         
@@ -180,43 +233,63 @@ class StyleSpecificSelfPlay:
         initial_position = self._create_position_from_opening(opening)
         
         try:
+            self.logger.info(f"Generating game {game_id} with opening {opening.name if opening else 'None'}...")
             # DEDUPLICATED: Use centralized self-play generation
             training_examples, final_state, move_history, game_resigned, winner = generate_self_play_game(
                 chess_engine=mcts_engine,
                 initial_state=initial_position,
                 num_simulations=config.get('mcts_simulations', 100),
-                temperature_schedule=None,  # Uses style-based schedule
+                temperature_schedule=None,  # Let the function create the schedule based on style
                 max_moves=config.get('max_moves', 150),
                 enable_resignation=config.get('enable_resignation', True),
                 filter_draws=False,  # Handle filtering at higher level
                 style=style,
                 dirichlet_alpha=config.get('dirichlet_alpha', 0.3)
             )
+            self.logger.info(f"Game {game_id} generated with {len(training_examples)} examples")
             
             if not training_examples:
                 self.logger.warning(f"Game {game_id} generated no training examples")
                 return None
             
             # DEDUPLICATED: Use centralized result analysis
+            self.logger.info(f"Analyzing game {game_id}...")
             outcome_info = self.result_analyzer.analyze_game_outcome(
                 training_examples, game_resigned, winner
             )
-            
+            self.logger.info(f"Game {game_id} analysis complete")
+
             # DEDUPLICATED: Use centralized image saving
-            if self.image_manager and config.get('save_board_images', False):
-                self.image_manager.save_game_images(
+            self.logger.info(f"Saving images for game {game_id}...")
+            if config.get('save_board_images', True):
+                # Create image manager on-demand if needed
+                if not hasattr(self, '_temp_image_manager') or self._temp_image_manager is None:
+                    board_images_dir = config.get('board_images_dir', 'board_images')
+                    self._temp_image_manager = BoardImageManager(board_images_dir, logger=self.logger)
+                    self.logger.info(f"Created temporary BoardImageManager for image saving in {board_images_dir}")
+                
+                # Use either the permanent or temporary image manager
+                image_manager = self.image_manager or self._temp_image_manager
+                
+                image_manager.save_game_images(
                     initial_position=initial_position,
                     final_state=final_state,
                     training_examples=training_examples,
                     game_id=game_id,
-                    opening=opening,
+                    opening=opening,    
                     outcome_str=outcome_info['outcome_description'],
                     move_history=move_history
                 )
-            
+                self.logger.info(f"Game {game_id} images saved successfully")
+            else:
+                self.logger.debug(f"Image saving disabled for game {game_id}")
+            self.logger.info(f"Game {game_id} images processing complete")
+
             # DEDUPLICATED: Use centralized style adherence calculation
+            self.logger.info(f"Calculating style adherence for game {game_id}...")
             style_adherence = self._calculate_style_adherence(opening, training_examples)
-            
+            self.logger.info(f"Game {game_id} style adherence: {style_adherence:.2f}")
+
             return SelfPlayGameResult(
                 training_examples=training_examples,
                 game_length=len(training_examples),
@@ -244,7 +317,7 @@ class StyleSpecificSelfPlay:
         if opening is not None:
             try:
                 # DEDUPLICATED: Use centralized opening application logic
-                applied_moves = TrainingUtilities.apply_opening_moves(
+                applied_moves = apply_opening_moves(
                     board, opening.moves, opening.continuation_depth
                 )
                 self.logger.debug(f"Applied {applied_moves} moves from opening {opening.name}")
@@ -279,6 +352,83 @@ class StyleSpecificSelfPlay:
         """Reset all statistics."""
         self.statistics.reset()
         self.logger.info("Statistics reset")
+
+    def load_training_examples(self, filename: str) -> Optional[List[AlphaZeroTrainingExample]]:
+        """
+        Load previously saved training examples using FileManager.
+        
+        Args:
+            filename: Name of the file to load (without .pt extension)
+            
+        Returns:
+            List of training examples if successful, None if failed
+        """
+        examples, metadata = self.file_manager.load_training_examples(filename)
+        
+        if examples is not None and metadata is not None:
+            self.logger.info(f"📂 Loaded {len(examples)} training examples from {filename}")
+            self.logger.info(f"Original metadata: {metadata.get('style', 'unknown')} style, "
+                           f"{metadata.get('decisive_percentage', 'unknown')}% decisive games")
+            return examples
+        else:
+            self.logger.warning(f"❌ Failed to load training examples from {filename}")
+            return None
+    
+    def get_saved_files_info(self) -> Dict[str, List[str]]:
+        """
+        Get information about saved training files organized by date.
+        
+        Returns:
+            Dictionary with dates as keys and file lists as values
+        """
+        return self.file_manager.organize_files_by_date()
+    
+    def cleanup_old_training_data(self, days_to_keep: int = 30) -> int:
+        """
+        Clean up old training files using FileManager.
+        
+        Args:
+            days_to_keep: Number of days worth of files to keep
+            
+        Returns:
+            Number of files cleaned up
+        """
+        files_cleaned = self.file_manager.cleanup_old_files(days_to_keep)
+        self.logger.info(f"🧹 Cleaned up {files_cleaned} old training files (kept {days_to_keep} days)")
+        return files_cleaned
+    
+    def get_training_data_summary(self) -> Dict[str, Any]:
+        """
+        Get a comprehensive summary of all saved training data.
+        
+        Returns:
+            Dictionary with summary information about saved files
+        """
+        files_by_date = self.file_manager.organize_files_by_date()
+        
+        summary = {
+            'total_days_with_data': len(files_by_date),
+            'files_by_date': files_by_date,
+            'recent_files': [],
+            'total_files': 0
+        }
+        
+        # Get recent files (last 7 days)
+        import datetime
+        recent_cutoff = datetime.datetime.now() - datetime.timedelta(days=7)
+        recent_cutoff_str = recent_cutoff.strftime("%Y-%m-%d")
+        
+        for date_str, files in files_by_date.items():
+            summary['total_files'] += len(files)
+            if date_str >= recent_cutoff_str:
+                summary['recent_files'].extend(files)
+        
+        summary['recent_files_count'] = len(summary['recent_files'])
+        
+        self.logger.info(f"📊 Training data summary: {summary['total_files']} total files across {summary['total_days_with_data']} days")
+        self.logger.info(f"Recent activity: {summary['recent_files_count']} files in last 7 days")
+        
+        return summary
 
 
 # DEDUPLICATED: Simplified utility functions using centralized testing

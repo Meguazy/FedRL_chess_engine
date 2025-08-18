@@ -13,15 +13,34 @@ This eliminates duplication between AlphaZeroMCTS, StyleSpecificSelfPlay, and ot
 Author: Francesco Finucci
 """
 
+from collections import defaultdict
+import json
 import math
+import time
 import torch
 import torch.nn.functional as F
 import numpy as np
 import chess
-from typing import Dict, List, Optional, Any, Callable
-from dataclasses import dataclass
+import chess.svg  # Add chess.svg import for board image generation
+from typing import Dict, List, Optional, Any, Callable, Tuple
+from dataclasses import dataclass, asdict  # Add asdict import
 from enum import Enum
+from pathlib import Path
+import logging
 
+# For board image generation
+try:
+    import cairosvg
+    CAIROSVG_AVAILABLE = True
+except ImportError:
+    CAIROSVG_AVAILABLE = False
+
+try:
+    from PIL import Image
+    import io
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
 
 class GameOutcome(Enum):
     """Enumeration for game outcomes."""
@@ -49,94 +68,6 @@ class TrainingUtilities:
     should be centralized here.
     """
     
-    @staticmethod
-    def add_dirichlet_noise(action_probs: Dict[Any, float], 
-                           alpha: float = 0.3, 
-                           epsilon: float = 0.25) -> Dict[Any, float]:
-        """
-        CENTRALIZED: Add Dirichlet noise to action probabilities for exploration.
-        
-        This replaces all scattered implementations of Dirichlet noise.
-        
-        Args:
-            action_probs: Original action probabilities
-            alpha: Dirichlet concentration parameter (0.3 for chess)
-            epsilon: Noise mixing parameter (0.25 = 25% noise, 75% original)
-            
-        Returns:
-            Action probabilities with added noise
-        """
-        if not action_probs or alpha <= 0:
-            return action_probs
-        
-        actions = list(action_probs.keys())
-        probs = list(action_probs.values())
-        
-        if len(actions) == 0:
-            return action_probs
-        
-        try:
-            # Generate Dirichlet noise
-            noise = np.random.dirichlet([alpha] * len(actions))
-            
-            # Mix original probabilities with noise
-            noisy_probs = {}
-            for i, action in enumerate(actions):
-                noisy_probs[action] = (1 - epsilon) * probs[i] + epsilon * noise[i]
-            
-            # Normalize to ensure probabilities sum to 1
-            total_prob = sum(noisy_probs.values())
-            if total_prob > 0:
-                for action in noisy_probs:
-                    noisy_probs[action] /= total_prob
-            
-            return noisy_probs
-            
-        except Exception as e:
-            print(f"Warning: Failed to add Dirichlet noise: {e}")
-            return action_probs
-    
-    @staticmethod
-    def sample_action_from_probabilities(action_probs: Dict[Any, float], 
-                                       temperature: float = 1.0) -> Any:
-        """
-        CENTRALIZED: Sample action from probability distribution.
-        
-        This replaces scattered action sampling logic.
-        
-        Args:
-            action_probs: Action probability distribution
-            temperature: Temperature for sampling (0.0 = deterministic)
-            
-        Returns:
-            Sampled action
-        """
-        if not action_probs:
-            return None
-        
-        actions = list(action_probs.keys())
-        probabilities = list(action_probs.values())
-        
-        if len(actions) == 1:
-            return actions[0]
-        
-        if temperature == 0.0:
-            # Deterministic: choose action with highest probability
-            return max(action_probs.keys(), key=lambda a: action_probs[a])
-        else:
-            # Stochastic: sample from distribution
-            if sum(probabilities) > 0:
-                # Normalize probabilities
-                prob_tensor = torch.tensor(probabilities, dtype=torch.float32)
-                prob_tensor = prob_tensor / prob_tensor.sum()
-                
-                # Sample action
-                action_idx = torch.multinomial(prob_tensor, 1).item()
-                return actions[action_idx]
-            else:
-                # Fallback if all probabilities are zero
-                return actions[0]
-
 
 class TemperatureSchedules:
     """
@@ -326,91 +257,7 @@ class TrainingExampleFilters:
             return training_examples
         else:
             return []
-
-
-class ResignationLogic:
-    """
-    CENTRALIZED: Resignation decision logic.
     
-    This replaces scattered resignation implementations.
-    """
-    
-    @staticmethod
-    def should_resign_by_evaluation(value: float, 
-                                  threshold: float = -0.9,
-                                  move_count: int = 0,
-                                  min_moves: int = 20) -> bool:
-        """
-        Determine resignation based on neural network evaluation.
-        
-        Args:
-            value: Current position evaluation from neural network
-            threshold: Resignation threshold (default -0.9 = 90% loss probability)
-            move_count: Current move number
-            min_moves: Minimum moves before considering resignation
-            
-        Returns:
-            True if should resign, False otherwise
-        """
-        # Only consider resignation after opening
-        if move_count < min_moves:
-            return False
-        
-        return value < threshold
-    
-    @staticmethod
-    def should_resign_by_material(board: chess.Board, 
-                                threshold_centipawns: int = 500) -> bool:
-        """
-        Determine resignation based on material imbalance.
-        
-        Args:
-            board: Current chess position
-            threshold_centipawns: Material threshold in centipawns
-            
-        Returns:
-            True if should resign due to material disadvantage
-        """
-        # Import here to avoid circular imports
-        from ..core.game_utils import should_resign_material
-        return should_resign_material(board, threshold_centipawns)
-    
-    @staticmethod
-    def should_resign_combined(value: float, 
-                             board: chess.Board,
-                             move_count: int,
-                             eval_threshold: float = -0.9,
-                             material_threshold: int = 500,
-                             min_moves: int = 20) -> tuple[bool, str]:
-        """
-        Combined resignation logic using both evaluation and material.
-        
-        Args:
-            value: Neural network evaluation
-            board: Current chess position
-            move_count: Current move number
-            eval_threshold: Neural network resignation threshold
-            material_threshold: Material resignation threshold in centipawns
-            min_moves: Minimum moves before considering resignation
-            
-        Returns:
-            Tuple of (should_resign, reason)
-        """
-        if move_count < min_moves:
-            return False, "too_early"
-        
-        # Check neural network evaluation
-        if ResignationLogic.should_resign_by_evaluation(
-            value, eval_threshold, move_count, min_moves
-        ):
-            return True, "evaluation"
-        
-        # Check material imbalance
-        if ResignationLogic.should_resign_by_material(board, material_threshold):
-            return True, "material"
-        
-        return False, "continue"
-
 
 class GameOutcomeAnalyzer:
     """
@@ -532,11 +379,6 @@ class GameOutcomeAnalyzer:
                 else:
                     example.outcome = -1.0  # This player lost
 
-
-# Convenience functions for backward compatibility
-def add_dirichlet_noise(action_probs: Dict[Any, float], alpha: float = 0.3) -> Dict[Any, float]:
-    """Convenience function for backward compatibility."""
-    return TrainingUtilities.add_dirichlet_noise(action_probs, alpha)
 
 def tactical_temperature_schedule(move_num: int) -> float:
     """Convenience function for backward compatibility."""
@@ -1703,61 +1545,3 @@ def apply_opening_moves(board: chess.Board, moves: List[str], max_depth: int) ->
     
     return applied_moves
 
-
-def sample_action_from_probabilities(action_probs: Dict[Any, float], temperature: float) -> Any:
-    """
-    Sample an action from MCTS probabilities.
-    
-    This function is part of TrainingUtilities but defined here for easy import.
-    """
-    import torch
-    
-    if not action_probs:
-        return None
-    
-    actions = list(action_probs.keys())
-    probabilities = list(action_probs.values())
-    
-    if temperature == 0.0:
-        # Deterministic: choose best action
-        return max(action_probs.keys(), key=lambda a: action_probs[a])
-    else:
-        # Stochastic: sample from distribution
-        try:
-            action_idx = torch.multinomial(torch.tensor(probabilities), 1).item()
-            return actions[action_idx]
-        except Exception:
-            # Fallback to random choice
-            import random
-            return random.choice(actions)
-
-
-def add_dirichlet_noise(action_probs: Dict[Any, float], alpha: float = 0.3) -> Dict[Any, float]:
-    """
-    Add Dirichlet noise to action probabilities for exploration.
-    
-    This function is part of TrainingUtilities but defined here for easy import.
-    """
-    if not action_probs:
-        return action_probs
-    
-    try:
-        actions = list(action_probs.keys())
-        probs = list(action_probs.values())
-        
-        # Generate Dirichlet noise
-        noise = np.random.dirichlet([alpha] * len(actions))
-        
-        # Mix original probabilities with noise (75% original, 25% noise)
-        mixed_probs = [0.75 * p + 0.25 * n for p, n in zip(probs, noise)]
-        
-        # Normalize
-        total = sum(mixed_probs)
-        if total > 0:
-            mixed_probs = [p / total for p in mixed_probs]
-        
-        return {action: prob for action, prob in zip(actions, mixed_probs)}
-        
-    except Exception:
-        # Return original probabilities if noise addition fails
-        return action_probs

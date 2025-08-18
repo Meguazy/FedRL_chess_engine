@@ -17,7 +17,7 @@ import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple, Any
 import logging
 
-from .game_utils import ChessGameState
+from .game_utils import ChessGameState, should_resign_material
 
 logger = logging.getLogger(__name__)
 
@@ -107,8 +107,8 @@ class AlphaZeroNode:
             uniform_prob = 1.0 / len(legal_actions)
             for action in legal_actions:
                 self.prior_probs[action] = uniform_prob
-    
-    def select_child(self) -> Tuple[Any, 'AlphaZeroNode']:
+
+    def select_child(self, c_puct: float) -> Tuple[Any, 'AlphaZeroNode']:
         """
         Select child using improved PUCT algorithm.
         """
@@ -136,7 +136,7 @@ class AlphaZeroNode:
             
             # PUCT exploration term
             prior_prob = self.prior_probs[action]
-            exploration = self.c_puct * prior_prob * sqrt_parent_visits / (1 + visit_count)
+            exploration = c_puct * prior_prob * sqrt_parent_visits / (1 + visit_count)
             
             puct_value = q_value + exploration
             
@@ -229,7 +229,7 @@ class AlphaZeroMCTS:
     """
     
     def __init__(self, neural_network, c_puct: float = 1.25, device: str = 'cpu', 
-                 resignation_threshold: float = -0.9, logger=None):
+                 resignation_threshold: float = -0.9, resignation_centipawns: int = -500, logger=None):
         """
         Initialize AlphaZero MCTS.
         
@@ -238,12 +238,14 @@ class AlphaZeroMCTS:
             c_puct: PUCT exploration constant (1.25 is standard for chess)
             device: PyTorch device for neural network inference
             resignation_threshold: Value threshold for resignation
+            resignation_centipawns: Centipawn threshold for resignation
             logger: Logger instance for worker logging
         """
         self.neural_network = neural_network
         self.c_puct = c_puct
         self.device = device
         self.resignation_threshold = resignation_threshold
+        self.resignation_centipawns = resignation_centipawns
         self.logger = logger or logging.getLogger(__name__)
         
         # Set network to evaluation mode
@@ -286,7 +288,7 @@ class AlphaZeroMCTS:
         current = root
         
         while not current.is_leaf() and not current.state.is_terminal():
-            action, child = current.select_child()
+            action, child = current.select_child(c_puct=self.c_puct)
             if action is None or child is None:
                 break
             path.append((current, action, child))
@@ -369,9 +371,15 @@ class AlphaZeroMCTS:
         if value < self.resignation_threshold:
             if self.logger:
                 player = 'white' if current_state and current_state.board.turn else 'black'
-                self.logger.info(f"RESIGNATION: {player} resigns at move {move_count} (eval: {value:.3f})")
+                self.logger.info(f"RESIGNATION: {player} resigns due to evaluation threshold at move {move_count} (eval: {value:.3f})")
             return True
-        
+
+        if should_resign_material(current_state.board, self.resignation_centipawns):
+            if self.logger:
+                player = 'white' if current_state and current_state.board.turn else 'black'
+                self.logger.info(f"RESIGNATION: {player} resigns due to material disadvantage at move {move_count} (eval: {value:.3f})")
+            return True
+
         return False
     
     def get_best_action(self, root_state: ChessGameState, 
@@ -478,6 +486,7 @@ def generate_self_play_game(chess_engine: AlphaZeroMCTS, initial_state: ChessGam
     Returns:
         Tuple of (training_examples, final_state, move_history, game_resigned, winner)
     """
+    logger = logging.getLogger(__name__ + "generate_self_play_game")
     # Default temperature schedule
     if temperature_schedule is None:
         if style == 'tactical':
@@ -566,8 +575,12 @@ def generate_self_play_game(chess_engine: AlphaZeroMCTS, initial_state: ChessGam
     
     # Determine game outcome
     if game_resigned:
+        logger.info(f"Game resigned after {move_count} moves")
         final_outcome = -1.0 if winner == current_state.get_current_player() else 1.0
     elif current_state.is_terminal():
+        logger.info(f"Game ended after {move_count} moves")        
+        logger.info(f"Game ended with outcome: {current_state.get_outcome()}")
+
         final_outcome = current_state.get_reward()
         if current_state.board.outcome():
             if current_state.board.outcome().winner is None:
