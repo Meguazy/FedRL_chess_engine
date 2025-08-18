@@ -377,6 +377,7 @@ class AlphaZeroMCTS:
         if should_resign_material(current_state.board, self.resignation_centipawns):
             if self.logger:
                 player = 'white' if current_state and current_state.board.turn else 'black'
+                self.logger.info(f"Final FEN: {current_state.board.fen()}")
                 self.logger.info(f"RESIGNATION: {player} resigns due to material disadvantage at move {move_count} (eval: {value:.3f})")
             return True
 

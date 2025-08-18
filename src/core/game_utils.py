@@ -480,7 +480,7 @@ def evaluate_material_balance(board: chess.Board) -> float:
         return black_material - white_material
 
 
-def should_resign_material(board: chess.Board, threshold_centipawns: int = 500) -> bool:
+def should_resign_material(board: chess.Board, threshold_centipawns: int = -500) -> bool:
     """
     Check if current player should resign due to overwhelming material disadvantage.
     
@@ -491,4 +491,4 @@ def should_resign_material(board: chess.Board, threshold_centipawns: int = 500) 
     Returns:
         True if current player should resign due to material disadvantage
     """
-    return evaluate_material_balance(board) <= -threshold_centipawns
+    return evaluate_material_balance(board) <= threshold_centipawns

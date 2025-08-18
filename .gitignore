@@ -62,7 +62,7 @@ src/federated/
 src/utils/
 /docs/
 test_board_images/
-
+logs/
 # Temporary ignored files
 src/training/reward_shaping.py
 training_data/

@@ -144,7 +144,7 @@ class StyleSpecificSelfPlay:
         
         # DEDUPLICATED: Use centralized filtering with new anti-draw measures
         filter_draws = config.get('filter_draws', True)
-        minimum_decisive_ratio = config.get('minimum_decisive_ratio', 0.75)
+        minimum_decisive_ratio = config.get('minimum_decisive_ratio', 0.20)
         
         if filter_draws:
             # Apply aggressive draw filtering
